@@ -9,11 +9,12 @@ import type { Rgb } from './effects'
 export const CLAWD_W = 14
 export const CLAWD_H = 8
 
-// The body: B is the body, E an eye (its resting place, 1 wide and 2 tall).
+// The body: B is the body, E an eye (its resting place, 1 wide and 2 tall),
+// A a claw raised at the side, as the mascot holds them.
 const BODY = [
   '..BBBBBBBBBB..',
-  '.BBBBBBBBBBBB.',
-  '.BBBEBBBBBEBB.',
+  'A.BBBBBBBBBB.A',
+  'ABBBEBBBBBEBBA',
   '.BBBEBBBBBEBB.',
   '.BBBBBBBBBBBB.',
   '..BBBBBBBBBB..',
@@ -144,14 +145,15 @@ export function clawdPixels(look: ClawdLook): Pixel[] {
 export function clawdAnchors(look: ClawdLook): Anchors {
   const s = Math.max(1, Math.min(4, Math.round(look.scale)))
   const drop = look.pose === 'sit' ? CLAWD_H - BODY_H : 0
-  const mid = Math.floor((BODY_H / 2 + drop) * s)
+  // The claws: just outside each, level with the raised tip.
+  const claw = (1 + drop) * s
 
   return {
     w: CLAWD_W * s,
     h: CLAWD_H * s,
     top: { x: Math.floor((CLAWD_W / 2) * s), y: drop * s - 1 },
-    left: { x: s - 1, y: mid },
-    right: { x: (CLAWD_W - 1) * s, y: mid },
+    left: { x: -1, y: claw },
+    right: { x: CLAWD_W * s, y: claw },
     feet: { x: Math.floor((CLAWD_W / 2) * s), y: CLAWD_H * s },
     eyes: { x: EYES[0]! * s, y: (EYE_ROW + drop) * s, w: (EYES[1]! - EYES[0]! + 1) * s },
   }

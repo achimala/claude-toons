@@ -23,6 +23,7 @@ Each user message starts with the strip's size, "[strip 120x9]" (columns x rows)
 - "[your last scene's code stopped: ...]" means the code you wrote hit an error or ran out of time, and the error. Fix that mistake from now on.
 - "[recent scenes: ...]" lists the concepts of your last few scenes. Do not repeat any of them, or anything close.
 - "[world: ...]" is the setting this scene must live in (deep sea, wild west, cooking show...). Translate the real work into that world with wit: in a cooking show a failing test is a fallen soufflé, in the wild west a bug is an outlaw on a wanted poster. Fresh worlds keep the cartoon from going stale, so commit to it.
+- "[style: ...]" is how this scene is drawn, and it is not optional: "3D" means the scene is a 3D world drawn with camera, mesh3d, clawd3d and friends (a 2D Clawd or labels may sit on top); "pixel art" means the set and props are drawn with pixels() on the pixel grid, in several colors, Clawd dressed with pixel art at its anchors; "text art" means sprites and text. Each has its own look, and the developer wants to see all three over a session.
 You see the whole session in this one conversation.
 
 Tell the story visually. The picture carries the meaning: what Claude is doing, how it is going, what just broke or got fixed. There is no caption, and nothing should read like a status line. Text belongs in the picture only as labels on things, with the real names from the log: the file name on a crate or a book spine, the test name on a banner, the command on a little terminal.
@@ -78,6 +79,32 @@ function frame(t, dt) {
   if (!walking) say('npm test in the rain. 3 failing, umbrella holding.', cx + 7, h - 8)
 }
 
+A 3D example, for the shape of it (do not copy the idea): a road into the distance with crates passing and Clawd on it.
+const crate = box(1.2, 1.2, 1.2)
+const post = cylinder(0.08, 2, 6)
+const crates = Array.from({length: 6}, (_, i) => ({x: i % 2 ? 3 : -3, z: -4 - i * 6, spin: rand(i) * 3}))
+function frame(t, dt) {
+  camera(0, 2.2, 8 - t * 1.5, 0, 1, -30, 90)
+  fog(10, 45, "#000")
+  for (let i = -2; i < 12; i++) {
+    const z = -i * 6 + mod(t * 1.5, 6)
+    mesh3d(post, {x: -5, z, color: "#8a8"})
+    mesh3d(post, {x: 5, z, color: "#8a8"})
+    line3d(-5, 2, z, 5, 2, z, "#575")
+  }
+  line3d(-5, 0, 10, -5, 0, -80, "#aaa")
+  line3d(5, 0, 10, 5, 0, -80, "#aaa")
+  for (const c of crates) {
+    c.z += dt * 2.5
+    if (c.z > 10) c.z -= 40
+    mesh3d(crate, {x: c.x, y: 0.6, z: c.z, ry: c.spin + t, color: "#c96"})
+    const p = project(c.x, 1.5, c.z)
+    if (p) text(p.x - 3, p.y - 1, "auth.ts", "#ffd")
+  }
+  const me = clawd3d(0, 0, 4 - t * 1.5, {size: 1.4, facing: 0, stride: floor(t * 6) % 4})
+  if (me && t > 1) say("Six crates, one road, zero tests passing yet.", me.top.x, me.row - 1)
+}
+
 Reply with one scene as JSON matching the schema:
 - concept: one short line naming the scene's world, metaphor and shot, e.g. "wild west: Clawd as sheriff nailing a wanted poster for auth.ts to a saloon wall". Decide it first.
 - code: the scene's program, or "".
@@ -126,6 +153,10 @@ const WORLDS = [
 
 // How many past concepts each new request lists.
 const RECENT = 6
+
+// Drawing styles dealt with the world: 3D twice as often as the others,
+// since it is the one the model reaches for least on its own.
+const STYLES = ['3D', '3D', 'pixel art', 'text art']
 
 // The thread is cut back to KEEP messages once it reaches MOST, so a long
 // session never outgrows the context window; cutting in one go, not a little
@@ -231,7 +262,7 @@ export function createThread(model: Model) {
     const recent = concepts.slice(-RECENT)
     const steer = lines.length > 0 && lines.every(isQuiet)
       ? recent.length > 0 ? [`[continue: ${recent[recent.length - 1]}]`] : []
-      : [...(recent.length > 0 ? [`[recent scenes: ${recent.join(' / ')}]`] : []), `[world: ${deal(random)}]`]
+      : [...(recent.length > 0 ? [`[recent scenes: ${recent.join(' / ')}]`] : []), `[world: ${deal(random)}]`, `[style: ${STYLES[Math.floor(random() * STYLES.length)]}]`]
     messages.push({ role: 'user', content: [activity, ...steer].join('\n') })
   }
 
@@ -279,7 +310,7 @@ export function createThread(model: Model) {
 
     const content = typeof open?.content === 'string' ? open.content : ''
 
-    return content.split('\n').filter(line => !/^\[(recent scenes|world|continue): /.test(line)).join('\n')
+    return content.split('\n').filter(line => !/^\[(recent scenes|world|style|continue): /.test(line)).join('\n')
   }
 
   // Closes the exchange with the reply, kept whole, and reads its scene.

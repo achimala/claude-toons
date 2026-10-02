@@ -82,15 +82,50 @@ export function resolve(cam: Camera, w: number, h: number): View {
 
 export type Projected = { x: number; y: number; depth: number }
 
+// Nothing nearer than this draws: the near plane, where geometry that
+// crosses behind the camera is cut.
+const NEAR = 0.05
+
+// A point in the camera's frame: across, up, and its depth ahead.
+type ViewPoint = { r: number; u: number; d: number }
+
+const toView = (view: View, p: Vec3): ViewPoint => {
+  const d = sub(p, view.eye)
+
+  return { r: dot(d, view.right), u: dot(d, view.up), d: dot(d, view.forward) }
+}
+
+const toScreen = (view: View, v: ViewPoint): Projected => ({
+  x: (v.r * view.f) / v.d + view.w / 2,
+  y: view.h / 2 - (v.u * view.f) / v.d,
+  depth: v.d,
+})
+
 // A world point on the pixel grid, or undefined behind the camera.
 export function project(view: View, p: Vec3): Projected | undefined {
-  const d = sub(p, view.eye)
-  const depth = dot(d, view.forward)
-  if (depth < 0.05) return undefined
-  const x = (dot(d, view.right) * view.f) / depth + view.w / 2
-  const y = view.h / 2 - (dot(d, view.up) * view.f) / depth
+  const v = toView(view, p)
 
-  return { x, y, depth }
+  return v.d < NEAR ? undefined : toScreen(view, v)
+}
+
+// The part of a polygon in front of the near plane (Sutherland-Hodgman
+// against one plane): the same polygon, a cut one, or nothing.
+function clipNear(poly: ViewPoint[]): ViewPoint[] {
+  if (poly.every(v => v.d >= NEAR)) return poly
+  const out: ViewPoint[] = []
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i]!
+    const b = poly[(i + 1) % poly.length]!
+    const aIn = a.d >= NEAR
+    const bIn = b.d >= NEAR
+    if (aIn) out.push(a)
+    if (aIn !== bIn) {
+      const k = (NEAR - a.d) / (b.d - a.d)
+      out.push({ r: a.r + (b.r - a.r) * k, u: a.u + (b.u - a.u) * k, d: NEAR })
+    }
+  }
+
+  return out
 }
 
 // The world position of a model-space point.
@@ -158,9 +193,10 @@ function fillTriangle(target: Target, fog: Fog, a: Projected, b: Projected, c: P
 
 // A line between two world points, depth tested along its length.
 export function drawLine(target: Target, view: View, fog: Fog, p0: Vec3, p1: Vec3, color: Rgb) {
-  const a = project(view, p0)
-  const b = project(view, p1)
-  if (!a || !b) return
+  const ends = clipNear([toView(view, p0), toView(view, p1)])
+  if (ends.length < 2) return
+  const a = toScreen(view, ends[0]!)
+  const b = toScreen(view, ends[1]!)
   const steps = Math.min(600, Math.ceil(Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y))) || 1)
   for (let i = 0; i <= steps; i++) {
     const k = i / steps
@@ -197,23 +233,25 @@ export function drawMesh(target: Target, view: View, light: Light, fog: Fog, mes
   const { verts, faces } = mesh
   const n = Math.floor(verts.length / 3)
   const world: Vec3[] = []
-  const screen: (Projected | undefined)[] = []
+  const eyed: ViewPoint[] = []
   for (let i = 0; i < n; i++) {
     const p = transformPoint(t, [verts[i * 3]!, verts[i * 3 + 1]!, verts[i * 3 + 2]!])
     world.push(p)
-    screen.push(project(view, p))
+    eyed.push(toView(view, p))
   }
   const l = norm(light.dir)
   let drawn = 0
   for (let i = 0; i + 2 < faces.length && drawn < budget; i += 3) {
     const [ia, ib, ic] = [faces[i]!, faces[i + 1]!, faces[i + 2]!]
-    const a = screen[ia]
-    const b = screen[ib]
-    const c = screen[ic]
+    const va = eyed[ia]
+    const vb = eyed[ib]
+    const vc = eyed[ic]
     const pa = world[ia]
     const pb = world[ib]
     const pc = world[ic]
-    if (!a || !b || !c || !pa || !pb || !pc) continue
+    if (!va || !vb || !vc || !pa || !pb || !pc) continue
+    // Behind the camera entirely: nothing to draw.
+    if (va.d < NEAR && vb.d < NEAR && vc.d < NEAR) continue
     drawn += 1
     if (style.wire) {
       drawLine(target, view, fog, pa, pb, style.color)
@@ -228,7 +266,10 @@ export function drawMesh(target: Target, view: View, light: Light, fog: Fog, mes
       const k = light.ambient + (1 - light.ambient) * Math.abs(dot(normal, l))
       color = shadeOf(color, k)
     }
-    fillTriangle(target, fog, a, b, c, color)
+    // A triangle crossing the near plane is cut there, leaving a triangle
+    // or a quad, drawn as a fan.
+    const poly = clipNear([va, vb, vc]).map(v => toScreen(view, v))
+    for (let j = 1; j + 1 < poly.length; j++) fillTriangle(target, fog, poly[0]!, poly[j]!, poly[j + 1]!, color)
   }
 
   return drawn
