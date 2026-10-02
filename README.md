@@ -8,26 +8,92 @@ Claude model watches the tool calls and directs a new scene every few seconds.
 
 ## Install
 
-Clone this repo and load it as a plugin folder:
+You need the Claude Code CLI with plugin hook modules available. They are an
+early-access feature; spinner-buddy was built on version 2.1.287.
 
-```sh
-git clone <this repo> ~/src/spinner-buddy
-claude --plugin-dir ~/src/spinner-buddy
-```
+1. Clone the repo:
 
-To load it in every session, add the folder to `CLAUDE_CODE_PLUGIN_DIRS` in the
-`env` block of `~/.claude/settings.json`.
+   ```sh
+   git clone https://github.com/<owner>/spinner-buddy ~/src/spinner-buddy
+   ```
 
-The scenes are generated with your Claude Code session's own credentials. On a
-subscription, the requests count against your plan's usage; with an API key,
-they are billed to it.
+2. Try it for one session:
+
+   ```sh
+   claude --plugin-dir ~/src/spinner-buddy
+   ```
+
+   Give Claude any task; the cartoons appear under the spinner while it works.
+
+3. To load it in every session, add the folder to the `env` block of
+   `~/.claude/settings.json`, then restart Claude Code:
+
+   ```json
+   {
+     "env": {
+       "CLAUDE_CODE_PLUGIN_DIRS": "/Users/you/src/spinner-buddy"
+     }
+   }
+   ```
+
+   Use the full path. To load several plugin folders, separate them with `:`
+   (`;` on Windows).
+
+To update, `git pull` in the folder; a running session reloads the plugin when
+its files change. To uninstall, remove the folder from
+`CLAUDE_CODE_PLUGIN_DIRS` (or stop passing `--plugin-dir`) and delete it.
+
+**Nothing shows up?** Run `claude --debug` and look for a `spinner-buddy` line.
+A line saying hook modules are turned off means your Claude Code doesn't have
+the feature enabled yet; any other line names what went wrong. Cartoons only
+appear while Claude is working, and only in the terminal.
+
+## Controls
+
+- `/cartoons` shows or hides the cartoons, even while Claude is working.
+  `/cartoons on` and `/cartoons off` set it outright. The choice is remembered
+  across sessions. While hidden, no scenes are requested, so they cost nothing.
+- `/cartoons settings` opens a pane to pick the director model and how often a
+  new scene is requested, with an estimate of what that costs. The same two
+  settings are also in `/config`.
+
+## What it costs
+
+Each scene is one request to the director model, made with your Claude Code
+session's own credentials and nothing else. On a subscription, that counts
+toward your plan's usage limits like any other Claude use; if the session itself
+runs on an API key, it is billed to that key. If the session's login can't make
+the requests, the cartoons switch off for the session. They never fall back to
+another key from your environment.
+
+Rough API-price estimates for an hour of Claude working continuously:
+
+| New scene | Haiku 4.5 | Sonnet 5.5 (default) | Opus 5.5 |
+|---|---|---|---|
+| as fast as possible | ~$7.50 | ~$8.50 | ~$9.50 |
+| every 15 seconds (default) | ~$2.50 | ~$5 | ~$9 |
+| every 30 seconds | ~$1.25 | ~$2.50 | ~$4.50 |
+| every minute | ~$0.65 | ~$1.25 | ~$2.25 |
+
+Most of a scene's cost is the scene itself: a thousand or so tokens of ASCII
+art and code at output prices. The conversation history behind it is read
+from the prompt cache at a tenth of the input price, so it adds little.
+"As fast as possible" costs about the same on Haiku and Sonnet because Haiku
+answers faster and so draws more scenes an hour; at a fixed pace it is half
+the price.
+
+Nothing is spent while Claude is idle or the cartoons are hidden.
+`/cartoons settings` replaces these estimates with what you have actually
+spent, once there is enough of it. It also compares that with what Claude's
+own work costs, which is the clearest guide to how much of a subscription's
+limits the cartoons take up.
 
 ## How it works
 
 - **Watching:** a `tool.call` hook logs each tool Claude runs (command, file,
   pattern, and whether it failed); `prompt.submit` and `turn.complete` mark
   the turn's edges.
-- **Directing:** whenever there is news, the log goes to Sonnet 5.5 in one
+- **Directing:** whenever there is news, the log goes to the director model in one
   conversation for the session, so each request reads the earlier ones from the
   prompt cache. The conversation is cut back periodically so a long session
   never outgrows the context window. Sonnet answers a scene as JSON
@@ -60,7 +126,9 @@ they are billed to it.
 
 ## Files
 
-- `hooks/register.tsx`: the hooks: watching, asking for scenes, drawing.
+- `hooks/register.tsx`: the hooks: watching, asking for scenes, drawing, the
+  `/cartoons` command and settings pane.
+- `hooks/cost.ts`: prices, cost estimates and how they are described.
 - `hooks/narrator.ts`: the conversation with the model and its prompt.
 - `hooks/script.ts`: the scene renderer, the expression interpreter and the
   drawing calls scene code uses.

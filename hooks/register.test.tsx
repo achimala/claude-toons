@@ -66,7 +66,7 @@ test('a scene renders a full frame at every point of its life', async () => {
 })
 
 test('the thread is one append-only conversation, cached and on Sonnet 5.5', async () => {
-  const thread = createThread()
+  const thread = createThread('claude-sonnet-5-5')
   const scene = { background: { effect: 'rain', palette: ['#0a0', '#0f0'], speed: 1, intensity: 0.5 }, actors: [{ kind: 'clawd', frames: [], fps: 0, x: '3', y: '3', color: '#d97757', say: 'reading', sayAt: 0 }], particles: [] }
   const reply = JSON.stringify({
     content: [{ type: 'text', text: JSON.stringify(scene) }],
@@ -90,7 +90,7 @@ test('the thread is one append-only conversation, cached and on Sonnet 5.5', asy
 })
 
 test('new work gets a fresh world and the recent concepts; a quiet beat continues', async () => {
-  const thread = createThread()
+  const thread = createThread('claude-sonnet-5-5')
   const answer = (concept: string) =>
     JSON.stringify({
       content: [{ type: 'text', text: JSON.stringify({ concept, background: { effect: 'rain', palette: ['#0a0', '#0f0'], speed: 1, intensity: 0.5 }, actors: [], particles: [] }) }],
@@ -132,7 +132,7 @@ test('actors can come and go with show, and pick their frame by expression', asy
 })
 
 test('a long session cuts the thread back but keeps the task, and survives a garbled reply', async () => {
-  const thread = createThread()
+  const thread = createThread('claude-sonnet-5-5')
   const reply = JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ concept: 'c', code: '', background: { effect: 'rain', palette: ['#0a0', '#0f0'], speed: 1, intensity: 0.5 }, actors: [], particles: [] }) }], stop_reason: 'end_turn' })
   thread.ask('[strip 80x9]\n[task] hunt the bugs')
   thread.accept(reply)

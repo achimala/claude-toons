@@ -3,10 +3,10 @@
 // user message holding what the main agent did since the last; every reply is
 // kept exactly as returned, thinking blocks included.
 
+import type { CallUsage, Model } from './cost'
 import { EFFECTS } from './effects'
 import { cleanScript, type Script } from './script'
 
-const MODEL = 'claude-sonnet-5-5'
 
 // A request on the session's own subscription login opens its system prompt
 // as Claude Code's own requests do.
@@ -193,22 +193,14 @@ const SCHEMA = {
 type Block = Record<string, unknown>
 type Message = { role: 'user' | 'assistant'; content: string | Block[] }
 
-export type Usage = {
-  calls: number
-  input: number
-  cacheRead: number
-  cacheWrite: number
-  output: number
-}
-
-export type Narration = { script?: Script; error?: string }
+// A scene, or why there is none, and what the call spent when one was made.
+export type Narration = { script?: Script; error?: string; spent?: CallUsage }
 
 export const URL = 'https://api.anthropic.com/v1/messages'
 
 // The thread itself: the hooks send what it builds and hand back what came.
-export function createThread() {
+export function createThread(model: Model) {
   const messages: Message[] = []
-  const usage: Usage = { calls: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
   // Off once the API refuses the server-side fallback option.
   let canFallBack = true
   // The concepts of the scenes so far, and the worlds not yet dealt.
@@ -245,14 +237,18 @@ export function createThread() {
   const request = (kind: 'bearer' | 'api-key') => {
     const betas = [kind === 'bearer' ? 'oauth-2025-04-20' : '', canFallBack ? 'server-side-fallback-2026-07-01' : '']
     const body = {
-      model: MODEL,
+      model,
       max_tokens: 16000,
       system: [
         ...(kind === 'bearer' ? [{ type: 'text', text: IDENTITY }] : []),
         { type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } },
       ],
       cache_control: { type: 'ephemeral' },
-      output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA } },
+      // Haiku 4.5 takes no effort setting.
+      output_config: {
+        ...(model === 'claude-haiku-4-5' ? {} : { effort: 'low' }),
+        format: { type: 'json_schema', schema: SCHEMA },
+      },
       messages,
       ...(canFallBack ? { fallbacks: 'default' } : {}),
     }
@@ -296,23 +292,24 @@ export function createThread() {
       return { error: 'the API answered something unreadable' }
     }
     messages.push({ role: 'assistant', content: reply.content })
-    usage.calls += 1
-    usage.input += reply.usage?.input_tokens ?? 0
-    usage.cacheRead += reply.usage?.cache_read_input_tokens ?? 0
-    usage.cacheWrite += reply.usage?.cache_creation_input_tokens ?? 0
-    usage.output += reply.usage?.output_tokens ?? 0
-    if (reply.stop_reason === 'refusal') return { error: 'the buddy declined to draw that one' }
+    const spent: CallUsage = {
+      input: reply.usage?.input_tokens ?? 0,
+      output: reply.usage?.output_tokens ?? 0,
+      cacheRead: reply.usage?.cache_read_input_tokens ?? 0,
+      cacheWrite: reply.usage?.cache_creation_input_tokens ?? 0,
+    }
+    if (reply.stop_reason === 'refusal') return { error: 'the buddy declined to draw that one', spent }
     const answer = reply.content.find(block => block.type === 'text')?.text
     try {
       const raw = JSON.parse(typeof answer === 'string' ? answer : '') as { concept?: unknown }
       if (typeof raw?.concept === 'string' && raw.concept.trim()) concepts.push(raw.concept.trim().slice(0, 140))
       const script = cleanScript(raw)
 
-      return script ? { script } : { error: 'the buddy answered a scene it cannot draw' }
+      return script ? { script, spent } : { error: 'the buddy answered a scene it cannot draw', spent }
     } catch {
-      return { error: 'the buddy answered something other than a scene' }
+      return { error: 'the buddy answered something other than a scene', spent }
     }
   }
 
-  return { ask, request, isFallbackRefused, abandon, accept, usage }
+  return { ask, request, isFallbackRefused, abandon, accept }
 }

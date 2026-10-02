@@ -1,20 +1,36 @@
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
+import {
+  GAP_MS,
+  MODELS,
+  MODEL_NAMES,
+  PACES,
+  addTokens,
+  costOf,
+  emptyStats,
+  isModel,
+  isPace,
+  money,
+  spendKey,
+  summarizeCost,
+  type Model,
+  type Pace,
+  type Spend,
+  type Stats,
+  type Window,
+} from './cost'
 import { URL, createThread, type Narration } from './narrator'
 import { cleanScript, stage, type Script } from './script'
 
+const PLUGIN = 'spinner-buddy'
 const ROWS = 9
-// The least time between two scenes: the next is asked for as soon as the
-// last one lands, if anything has happened since.
-const GAP_MS = 1500
 // How long the band takes to rise to its full height when the spinner shows.
 const GROW_MS = 700
 // How long the log may stay quiet mid-turn before a "still going" line.
 const QUIET_MS = 10_000
-
-// Where each request's credential and status are written, outside the mod's
-// folder so writing it never reloads the mod.
-const LEDGER = '/tmp/spinner-buddy-auth.log'
+// The settings pane, and the slash command that toggles the cartoons or opens it.
+const PANE = 'spinner-buddy'
+const COMMAND = 'cartoons'
 
 // The buddy waking up, until its first scene arrives.
 const FIRST = cleanScript({
@@ -36,228 +52,515 @@ function describe(input: Record<string, unknown>) {
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
 
-export const register: Register = on => {
-  const thread = createThread()
-  let pending: string[] = []
-  let startedAt = 0
-  let lastCall = 0
-  let isTurn = false
-  let isAsking = false
-  let isAnimating = false
-  let error: string | undefined
-  let scene = FIRST
-  let previous: Script | undefined
-  let sceneAt = 0
-  let spinner: string | undefined
-  let cols = 60
-  // When the spinner showed, and the rows the band was last drawn with.
-  let shownAt = 0
-  let drawnRows = 1
-  const grown = (at: number) => clamp01((at - shownAt) / GROW_MS)
-  const rowsAt = (at: number) => Math.max(1, Math.ceil(ROWS * (1 - Math.pow(1 - grown(at), 3))))
-  const frameAt = (at: number, rows: number) =>
-    stage({
-      cols,
-      rows,
-      t: at / 1000,
-      script: scene,
-      previous,
-      since: at - sceneAt,
-      reveal: clamp01((at - shownAt) / (GROW_MS * 1.6)),
-    })
-  // Whether ANTHROPIC_API_KEY has stood in for the login yet (for one toast),
-  // and the recent requests' credentials, written to LEDGER.
-  let usedKey = false
-  // What is under way: tool calls running now, with when each began, and the
-  // spinner's last phase, for the log's start, finish and "still" lines.
-  const running = new Map<number, { what: string; at: number }>()
-  let callCount = 0
-  let phase = ''
-  let phaseAt = 0
-  let loggedAt = 0
-  const stamp = (at: number) => `+${Math.round((at - startedAt) / 1000)}s`
-  const note = (at: number, line: string) => {
-    pending.push(`${stamp(at)} ${line}`)
-    loggedAt = at
+// Stats as stored, made safe to add to.
+function cleanStats(raw: unknown): Stats {
+  const stats = emptyStats()
+  if (typeof raw !== 'object' || raw === null) return stats
+  const r = raw as { buddy?: Record<string, unknown>; main?: unknown }
+  const spend = (v: unknown): Spend | undefined => {
+    const s = v as Partial<Spend> | null
+    if (!s || typeof s !== 'object' || typeof s.usd !== 'number' || typeof s.scenes !== 'number' || typeof s.activeMs !== 'number') return undefined
+
+    return { usd: s.usd, scenes: s.scenes, activeMs: s.activeMs }
   }
-  let ledger: string[] = []
+  for (const [key, v] of Object.entries(r.buddy ?? {})) {
+    const s = spend(v)
+    if (s) stats.buddy[key] = s
+  }
+  stats.main = spend(r.main) ?? stats.main
+
+  return stats
+}
+
+// Everything the buddy keeps for the session.
+type Buddy = {
+  model: Model
+  pace: Pace
+  thread: ReturnType<typeof createThread>
+  // The log of what happened since the last scene, and when the turn began.
+  pending: string[]
+  startedAt: number
+  lastCall: number
+  loggedAt: number
+  isTurn: boolean
+  isAsking: boolean
+  isAnimating: boolean
+  // The last trouble toasted, so the same again is not.
+  error?: string
+  // The scene playing, the one fading out, and when the scene arrived.
+  scene: Script
+  previous?: Script
+  sceneAt: number
+  // The spinner being drawn on, its width, when it showed, and the rows the
+  // band was last drawn with.
+  spinner?: string
+  cols: number
+  shownAt: number
+  drawnRows: number
+  // Whether the session's login refused these requests: no more are made.
+  isRefused: boolean
+  // Tool calls running now with when each began, and the spinner's phase.
+  running: Map<number, { what: string; at: number }>
+  callCount: number
+  phase: string
+  phaseAt: number
   // No request before this time: a rate limit's or a failure's wait, and how
   // many requests in a row have failed.
-  let calmUntil = 0
-  let failures = 0
+  calmUntil: number
+  failures: number
+  // Whether the cartoons show (kept across sessions), and what they and
+  // Claude's own work have spent, for the settings pane's estimates.
+  isShown: boolean
+  stats: Stats
+  sessionUsd: number
+  sessionScenes: number
+  isSubscription: boolean
+  windows: Window[]
+  // The turn's start and the session's cost then, and when working time with
+  // the cartoons showing was last added up.
+  turnAt: number
+  turnCostAt: number
+  accruedAt: number
+}
+
+function createBuddy(model: Model, pace: Pace): Buddy {
+  return {
+    model,
+    pace,
+    thread: createThread(model),
+    pending: [],
+    startedAt: 0,
+    lastCall: 0,
+    loggedAt: 0,
+    isTurn: false,
+    isAsking: false,
+    isAnimating: false,
+    scene: FIRST,
+    sceneAt: 0,
+    cols: 60,
+    shownAt: 0,
+    drawnRows: 1,
+    isRefused: false,
+    running: new Map(),
+    callCount: 0,
+    phase: '',
+    phaseAt: 0,
+    calmUntil: 0,
+    failures: 0,
+    isShown: true,
+    stats: emptyStats(),
+    sessionUsd: 0,
+    sessionScenes: 0,
+    isSubscription: false,
+    windows: [],
+    turnAt: 0,
+    turnCostAt: 0,
+    accruedAt: 0,
+  }
+}
+
+const rowsAt = (b: Buddy, at: number) => {
+  const grown = clamp01((at - b.shownAt) / GROW_MS)
+
+  return Math.max(1, Math.ceil(ROWS * (1 - Math.pow(1 - grown, 3))))
+}
+
+const frameAt = (b: Buddy, at: number, rows: number) =>
+  stage({
+    cols: b.cols,
+    rows,
+    t: at / 1000,
+    script: b.scene,
+    previous: b.previous,
+    since: at - b.sceneAt,
+    reveal: clamp01((at - b.shownAt) / (GROW_MS * 1.6)),
+  })
+
+const stamp = (b: Buddy, at: number) => `+${Math.round((at - b.startedAt) / 1000)}s`
+
+// Logs a line for the next scene; while the cartoons are hidden nothing is
+// logged, so nothing is sent.
+function note(b: Buddy, at: number, line: string) {
+  if (!b.isShown) return
+  b.pending.push(`${stamp(b, at)} ${line}`)
+  b.loggedAt = at
+}
+
+const bucket = (b: Buddy) => (b.stats.buddy[spendKey(b.model, b.pace)] ??= { usd: 0, scenes: 0, activeMs: 0 })
+
+// Adds up Claude's working time with the cartoons showing.
+function accrue(b: Buddy, now: number) {
+  if (b.isTurn && b.isShown && b.accruedAt > 0) bucket(b).activeMs += Math.max(0, now - b.accruedAt)
+  b.accruedAt = now
+}
+
+// One scene request, on the session's own credential and nothing else: on a
+// subscription it counts toward the plan's limits, never a separate bill. If
+// the login refuses (no credential, 401, 403), the cartoons stop asking for
+// the rest of the session rather than looking for another way to pay.
+async function requestScene($: EngineInterface, b: Buddy): Promise<Narration> {
+  const auth = await $.session.authorize()
+  let response: { ok: boolean; status: number; text: string; headers: Record<string, string> } | undefined
+  if (auth) {
+    response = await $.http.fetch(URL, { method: 'POST', auth: auth.handle, ...b.thread.request(auth.kind) })
+    if (b.thread.isFallbackRefused(response.status, response.text)) {
+      response = await $.http.fetch(URL, { method: 'POST', auth: auth.handle, ...b.thread.request(auth.kind) })
+    }
+  }
+  if (!response || response.status === 401 || response.status === 403) {
+    b.thread.abandon()
+    b.isRefused = true
+
+    return { error: "this session's login can't make the requests the cartoons need, so they are off for this session" }
+  }
+  if (response.ok) {
+    b.failures = 0
+
+    return b.thread.accept(response.text)
+  }
+  b.pending.unshift(b.thread.abandon().replace(/^\[strip [^\]]*\]\n/, ''))
+  // A rate limit waits as long as it asks; any other failure waits a little
+  // longer each time it repeats.
+  b.failures += 1
+  const wait = response.status === 429 ? Number(response.headers['retry-after'] ?? 20) : Math.min(120, 5 * 2 ** (b.failures - 1))
+  b.calmUntil = (await $.clock.now()) + Math.max(5, Math.min(120, wait || 20)) * 1000
+
+  return { error: `API ${response.status}: ${response.text.replace(/\s+/g, ' ').slice(0, 140)}` }
+}
+
+// Asks for a scene whenever there is news, at most once per the pace's gap,
+// while a turn runs and the cartoons show.
+function ask($: EngineInterface, b: Buddy) {
+  if (b.isAsking) return
+  b.isAsking = true
+  const gapMs = GAP_MS[b.pace]
+  void (async () => {
+    while (b.isTurn && b.isShown && !b.isRefused) {
+      const now = await $.clock.now()
+      // A quiet stretch mid-turn is news too: what is still going on.
+      const quiet = Math.max(QUIET_MS, gapMs)
+      if (b.pending.length === 0 && now - b.loggedAt >= quiet && now - b.lastCall >= quiet) {
+        const oldest = [...b.running.values()].sort((x, y) => x.at - y.at)[0]
+        if (oldest) note(b, now, `still running ${oldest.what} (${Math.round((now - oldest.at) / 1000)}s so far)`)
+        else if (b.phase) note(b, now, `still ${b.phase} (${Math.round((now - b.phaseAt) / 1000)}s so far)`)
+        else b.loggedAt = now
+      }
+      if (b.pending.length > 0 && now - b.lastCall >= gapMs && now >= b.calmUntil) {
+        b.lastCall = now
+        // A scene whose code broke is news for the narrator, once.
+        const broken = b.scene.code?.error && !b.scene.code.isReported ? b.scene.code : undefined
+        if (broken) broken.isReported = true
+        const activity = [...(broken ? [`[your last scene's code stopped: ${broken.error?.slice(0, 200)}]`] : []), ...b.pending].join('\n')
+        b.pending = []
+        b.thread.ask(`[strip ${b.cols}x${ROWS}]\n${activity}`)
+        const told = await requestScene($, b)
+        if (told.spent) {
+          const usd = costOf(b.model, told.spent)
+          const spend = bucket(b)
+          spend.usd += usd
+          spend.scenes += 1
+          addTokens(spend, told.spent)
+          b.sessionUsd += usd
+          b.sessionScenes += 1
+          await $.store.set('stats', b.stats).catch(() => {})
+        }
+        if (told.script) {
+          b.previous = b.scene
+          b.scene = told.script
+          b.sceneAt = await $.clock.now()
+          b.error = undefined
+        } else {
+          if (told.error && told.error !== b.error) $.ui.toast(`spinner buddy: ${told.error}`)
+          b.error = told.error
+        }
+        $.ui.invalidate('ui.render')
+      }
+      await $.clock.sleep(400)
+    }
+    b.isAsking = false
+  })().catch(() => {
+    // The module unloaded mid-wait (a reload): the next load asks afresh.
+    b.isAsking = false
+  })
+}
+
+// Shows or hides the cartoons; hidden, nothing is asked for or drawn.
+async function toggle($: EngineInterface, b: Buddy, show: boolean) {
+  const now = await $.clock.now()
+  accrue(b, now)
+  b.isShown = show
+  await $.store.set('isShown', show).catch(() => {})
+  if (show && b.isTurn) {
+    // The narrator missed what happened while hidden: it starts fresh.
+    note(b, now, '[the developer switched the cartoons on]')
+    ask($, b)
+  }
+  if (!show) b.pending = []
+  $.ui.invalidate('ui.render')
+}
+
+// Reads the session's cost and its plan's windows, if it has any.
+async function readPlan($: EngineInterface, b: Buddy) {
+  const usage = await $.session.usage()
+  b.isSubscription = usage.rateLimits.length > 0
+  b.windows = usage.rateLimits
+
+  return usage.cost?.usd ?? 0
+}
+
+// Changes one of the plugin's settings as /config would; the engine then
+// reloads the plugin with it. The row's key is the plugin's name (or its
+// name@inline when loaded from a folder), a dot, and the field.
+async function setOption($: EngineInterface, field: string, value: string) {
+  const rows = await $.config.list()
+  const row = rows.find(r => r.key.startsWith(PLUGIN) && r.key.endsWith(`.${field}`))
+  const { deny } = await $.config.set({ key: row?.key ?? `${PLUGIN}.${field}`, value })
+  if (deny) $.ui.toast(`spinner buddy: could not change ${field}: ${deny}`)
+}
+
+// Paints the scene at about 20 frames a second while the spinner shows, each
+// frame once the last one landed.
+function animate($: EngineInterface, b: Buddy) {
+  if (b.isAnimating) return
+  b.isAnimating = true
+  void (async () => {
+    while (b.spinner && b.isShown) {
+      const at = await $.clock.now()
+      // While it grows, each new height is a redraw; frames keep painting at
+      // the height drawn until it lands.
+      if (rowsAt(b, at) !== b.drawnRows) $.ui.invalidate('ui.render')
+      const frame = frameAt(b, at, b.drawnRows)
+      await $.ui.blit({ requestId: b.spinner, key: 'oracle', cells: frame, columns: b.cols, rows: b.drawnRows }).catch(() => {})
+      await $.clock.sleep(50)
+    }
+    b.isAnimating = false
+  })().catch(() => {
+    b.isAnimating = false
+  })
+}
+
+export const register: Register = (on, options) => {
+  const settings = options as Record<string, unknown>
+  const b = createBuddy(isModel(settings.model) ? settings.model : 'claude-sonnet-5-5', isPace(settings.pace) ? settings.pace : 'every 15 seconds')
+
+  on('session.start', async ($, e, next) => {
+    b.isShown = (await $.store.get('isShown')) !== false
+    b.stats = cleanStats(await $.store.get('stats'))
+    await $.command.register({
+      name: COMMAND,
+      description: 'Show or hide the spinner cartoons; "/cartoons settings" for the model, pace and cost',
+      argumentHint: '[on|off|settings]',
+      immediate: true,
+    })
+
+    return next(e)
+  })
+
+  on('command.run', { command: COMMAND }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+    if (arg === 'settings') {
+      await $.ui.open({ id: PANE, title: 'Spinner buddy', focus: true, closeOnEscape: true, rows: 22 })
+
+      return { text: 'Spinner buddy settings opened.' }
+    }
+    await toggle($, b, arg === 'on' ? true : arg === 'off' ? false : !b.isShown)
+
+    return {
+      text: b.isShown
+        ? `Cartoons on (${MODEL_NAMES[b.model]}, a new scene ${b.pace}). /cartoons settings shows what they cost.`
+        : 'Cartoons off: no scenes are requested or drawn until you turn them back on with /cartoons.',
+    }
+  })
 
   on('prompt.submit', async ($, e, next) => {
-    startedAt = await $.clock.now()
-    pending.push(`[task] ${e.text.replace(/\s+/g, ' ').slice(0, 400)}`)
-    loggedAt = startedAt
-    phase = ''
-    running.clear()
-    isTurn = true
-    // Asks for a scene as soon as there is news, then at most every GAP_MS.
-    void (async () => {
-      if (isAsking) return
-      isAsking = true
-      while (isTurn) {
-        const now = await $.clock.now()
-        // A quiet stretch mid-turn is news too: what is still going on.
-        if (pending.length === 0 && now - loggedAt >= QUIET_MS && now - lastCall >= QUIET_MS) {
-          const oldest = [...running.values()].sort((a, b) => a.at - b.at)[0]
-          if (oldest) note(now, `still running ${oldest.what} (${Math.round((now - oldest.at) / 1000)}s so far)`)
-          else if (phase) note(now, `still ${phase} (${Math.round((now - phaseAt) / 1000)}s so far)`)
-          else loggedAt = now
-        }
-        if (pending.length > 0 && now - lastCall >= GAP_MS && now >= calmUntil) {
-          lastCall = now
-          // A scene whose code broke is news for the narrator, once.
-          const broken = scene.code?.error && !scene.code.isReported ? scene.code : undefined
-          if (broken) broken.isReported = true
-          const activity = [...(broken ? [`[your last scene's code stopped: ${broken.error?.slice(0, 200)}]`] : []), ...pending].join('\n')
-          pending = []
-          thread.ask(`[strip ${cols}x${ROWS}]\n${activity}`)
-          let told: Narration
-          // The session's own login first, every time: on a subscription that
-          // is what the call bills. ANTHROPIC_API_KEY stands in only when the
-          // login refuses direct calls outright (401 or 403), never for a rate
-          // limit, which is waited out on the login.
-          const auth = await $.session.authorize()
-          const usage = await $.session.usage()
-          const plan = usage.rateLimits.length > 0 ? 'subscription' : 'no subscription windows'
-          let via = auth ? (auth.kind === 'bearer' ? 'session login (OAuth)' : 'session API key') : 'none'
-          let response: { ok: boolean; status: number; text: string; headers: Record<string, string> } | undefined
-          if (auth) {
-            response = await $.http.fetch(URL, { method: 'POST', auth: auth.handle, ...thread.request(auth.kind) })
-            if (thread.isFallbackRefused(response.status, response.text)) {
-              response = await $.http.fetch(URL, { method: 'POST', auth: auth.handle, ...thread.request(auth.kind) })
-            }
-          }
-          if (!response || response.status === 401 || response.status === 403) {
-            const refused = response ? `${response.status} ${response.text.replace(/\s+/g, ' ').slice(0, 200)}` : 'no login'
-            const key = await $.env.get('ANTHROPIC_API_KEY')
-            if (key) {
-              if (!usedKey) $.ui.toast('spinner buddy: your login refused the call, so it is using ANTHROPIC_API_KEY')
-              usedKey = true
-              via = `ANTHROPIC_API_KEY (login refused: ${refused})`
-              const sent = thread.request('api-key')
-              response = await $.http.fetch(URL, { method: 'POST', body: sent.body, headers: { ...sent.headers, 'x-api-key': key } })
-            }
-          }
-          if (!response) {
-            thread.abandon()
-            told = { error: 'no Anthropic credential in this session' }
-          } else if (response.ok) {
-            failures = 0
-            told = thread.accept(response.text)
-          } else {
-            pending.unshift(thread.abandon().replace(/^\[strip [^\]]*\]\n/, ''))
-            // A rate limit waits as long as it asks; any other failure waits a
-            // little longer each time it repeats, instead of retrying every
-            // GAP_MS.
-            failures += 1
-            const wait = response.status === 429 ? Number(response.headers['retry-after'] ?? 20) : Math.min(120, 5 * 2 ** (failures - 1))
-            calmUntil = (await $.clock.now()) + Math.max(5, Math.min(120, wait || 20)) * 1000
-            told = { error: `API ${response.status}: ${response.text.replace(/\s+/g, ' ').slice(0, 140)}` }
-          }
-          // Which credential paid for each request, for the developer to check.
-          const read = response?.ok ? /"cache_read_input_tokens":\s*(\d+)/.exec(response.text)?.[1] ?? 0 : 0
-          const stamp = new Date(await $.clock.now()).toISOString()
-          ledger = [...ledger, `${stamp} plan=${plan} via=${via} status=${response?.status ?? '-'} cacheRead=${read}${told.error ? ` error=${told.error}` : ''}`].slice(-60)
-          await $.fs.write(LEDGER, `${ledger.join('\n')}\n`).catch(() => {})
-          if (told.script) {
-            previous = scene
-            scene = told.script
-            sceneAt = await $.clock.now()
-            error = undefined
-          } else {
-            // A new kind of trouble is worth one toast; the same again is not.
-            if (told.error && told.error !== error) $.ui.toast(`spinner buddy: ${told.error}`)
-            error = told.error
-          }
-          $.ui.invalidate('ui.render')
-        }
-        await $.clock.sleep(400)
-      }
-      isAsking = false
-    })().catch(() => {
-      // The module unloaded mid-wait (a reload): the next load asks afresh.
-      isAsking = false
-    })
+    const now = await $.clock.now()
+    b.startedAt = now
+    if (b.isShown) b.pending.push(`[task] ${e.text.replace(/\s+/g, ' ').slice(0, 400)}`)
+    b.loggedAt = now
+    b.phase = ''
+    b.running.clear()
+    b.isTurn = true
+    b.turnAt = now
+    b.accruedAt = now
+    b.turnCostAt = await readPlan($, b)
+    if (b.isShown) ask($, b)
 
     return next(e)
   })
 
   on('tool.call', async ($, e, next) => {
     const what = `${e.tool}${describe(e as unknown as Record<string, unknown>)}`
-    const id = (callCount += 1)
+    const id = (b.callCount += 1)
     const began = await $.clock.now()
-    if (isTurn) {
-      running.set(id, { what, at: began })
-      note(began, `-> started ${what}`)
+    if (b.isTurn) {
+      b.running.set(id, { what, at: began })
+      note(b, began, `-> started ${what}`)
     }
     const ran = await next(e)
-    running.delete(id)
-    if (isTurn) {
+    b.running.delete(id)
+    if (b.isTurn) {
       const at = await $.clock.now()
       const took = Math.round((at - began) / 1000)
       const how = ran.deny !== undefined ? 'denied' : ran.isError ? `failed: ${(ran.text ?? '').replace(/\s+/g, ' ').slice(0, 120)}` : 'done'
-      note(at, `<- ${how} after ${took}s: ${what}`)
+      note(b, at, `<- ${how} after ${took}s: ${what}`)
     }
 
     return ran
   })
 
-  on('turn.complete', ($, e, next) => {
-    isTurn = false
-    spinner = undefined
-    pending.push('[turn finished]')
+  on('turn.complete', async ($, e, next) => {
+    const now = await $.clock.now()
+    accrue(b, now)
+    b.isTurn = false
+    b.spinner = undefined
+    if (b.isShown) b.pending.push('[turn finished]')
+    // What Claude's own work cost this turn, against its working time: the
+    // yardstick the settings pane measures the cartoons by.
+    if (b.turnAt > 0) {
+      const cost = await readPlan($, b)
+      b.stats.main.usd += Math.max(0, cost - b.turnCostAt)
+      b.stats.main.activeMs += now - b.turnAt
+      b.stats.main.scenes += 1
+      b.turnAt = 0
+      await $.store.set('stats', b.stats).catch(() => {})
+    }
 
     return next(e)
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    await readPlan($, b)
+    const cost = summarizeCost({ stats: b.stats, model: b.model, pace: b.pace, windows: b.windows })
+    if (e.surface === 'mobile') {
+      const { Text } = $.ui.resolve(e)
+
+      return <Text>Cartoons cost about {money(cost.hour.usd)} per hour of Claude working. Change settings in the terminal.</Text>
+    }
+    const { Box, Text, Select } = $.ui.resolve(e)
+    // A label and its value on one line, the labels in one column.
+    const row = (label: string, value: string, note?: string) => (
+      <Box flexDirection="row">
+        <Box width={18}>
+          <Text dimColor>{label}</Text>
+        </Box>
+        <Text>{value}</Text>
+        {note && <Text dimColor>{`  ${note}`}</Text>}
+      </Box>
+    )
+    const heading = (text: string) => (
+      <Box marginTop={1}>
+        <Text bold color="#d97757">
+          {text}
+        </Text>
+      </Box>
+    )
+    const cheapest = Math.min(...cost.models.map(m => m.usd))
+
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        <Select
+          key="shown"
+          label="Cartoons          "
+          options={[{ value: 'shown' }, { value: 'hidden' }]}
+          value={b.isShown ? 'shown' : 'hidden'}
+          autoFocus
+          onSelect={(value: string) => void toggle($, b, value === 'shown')}
+        />
+        <Select
+          key="model"
+          label="Director model    "
+          options={MODELS.map(m => ({ value: m, label: MODEL_NAMES[m] }))}
+          value={b.model}
+          onSelect={(value: string) => void setOption($, 'model', value)}
+        />
+        <Select
+          key="pace"
+          label="New scene         "
+          options={PACES.map(p => ({ value: p }))}
+          value={b.pace}
+          onSelect={(value: string) => void setOption($, 'pace', value)}
+        />
+        <Text dimColor>Toggle any time with /cartoons, even while Claude works</Text>
+
+        {heading('Per hour of Claude working')}
+        {row(
+          'Cost',
+          `~${money(cost.hour.usd)}`,
+          cost.hour.measuredMinutes !== undefined ? `measured over ${cost.hour.measuredMinutes} min` : 'estimate',
+        )}
+        {row('Scenes', `~${Math.round(cost.hour.scenes)}`)}
+        {cost.perScene &&
+          row(
+            'Per scene',
+            money(cost.perScene.usd),
+            `${Math.round(cost.perScene.outputShare * 100)}% is the scene itself (~${Math.round(cost.perScene.output)} tokens); the rest is the cached history (~${Math.round(cost.perScene.cacheRead / 1000)}k tokens, mostly cache reads)`,
+          )}
+        {cost.vsClaude
+          ? row('vs. Claude itself', `+${cost.vsClaude.percent}% usage`, `like ${cost.vsClaude.minutes} more min of Claude working`)
+          : row('vs. Claude itself', 'not measured yet', 'after ~10 min of Claude working')}
+
+        {heading('Each model at this pace')}
+        {cost.models.map(m => (
+          <Box flexDirection="row">
+            <Box width={18}>
+              <Text bold={m.model === b.model} dimColor={m.model !== b.model}>
+                {m.model === b.model ? `> ${m.name}` : `  ${m.name}`}
+              </Text>
+            </Box>
+            <Text bold={m.model === b.model} dimColor={m.model !== b.model}>{`~${money(m.usd)}/hr`}</Text>
+            <Text dimColor>{`  ~${Math.round(m.scenes)} scenes${m.usd === cheapest ? ', cheapest' : ''}`}</Text>
+          </Box>
+        ))}
+
+        {heading('Usage')}
+        {cost.windows.length > 0 && row('Your plan', cost.windows.map(w => `${w.label} ${w.percent}%`).join(' · '))}
+        {row('This session', `${b.sessionScenes} scenes · ${money(b.sessionUsd)}`)}
+
+        <Box marginTop={1}>
+          <Text dimColor>
+            {b.isSubscription
+              ? "On a subscription this isn't charged separately: it counts toward your plan's usage limits."
+              : "Billed to this session's API key."}{' '}
+            Hidden or idle: nothing.
+          </Text>
+        </Box>
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
     if (e.surface !== 'terminal') return next(e)
     const spinnerLine = await next(e)
-    // The spinner knows when Claude turns to thinking or to writing its reply.
-    const nextPhase = e.props.mode === 'thinking' ? 'thinking' : e.props.mode === 'responding' ? 'writing the reply' : ''
-    if (isTurn && nextPhase && nextPhase !== phase) {
-      const at = await $.clock.now()
-      phase = nextPhase
-      phaseAt = at
-      note(at, `[Claude is ${nextPhase}]`)
-    } else if (!nextPhase) {
-      phase = ''
+    if (!b.isShown) {
+      b.spinner = undefined
+
+      return spinnerLine
     }
     const { Box, Raster } = $.ui.resolve(e)
-    const now = await $.clock.now()
-    if (spinner !== e.requestId) shownAt = now
-    spinner = e.requestId
-    // A little narrower than the screen, so the spinner's indent never clips it.
-    cols = Math.max(20, Math.min(220, (e.viewport?.columns ?? 80) - 6))
-    drawnRows = rowsAt(now)
-    const cells = frameAt(now, drawnRows)
-    // Paints the scene at about 20 frames a second while the spinner shows,
-    // each frame once the last one landed.
-    if (!isAnimating) {
-      isAnimating = true
-      if (sceneAt === 0) sceneAt = now
-      void (async () => {
-        while (spinner) {
-          const at = await $.clock.now()
-          // While it grows, each new height is a redraw; frames keep painting
-          // at the height drawn until it lands.
-          if (rowsAt(at) !== drawnRows) $.ui.invalidate('ui.render')
-          const frame = frameAt(at, drawnRows)
-          await $.ui.blit({ requestId: spinner, key: 'oracle', cells: frame, columns: cols, rows: drawnRows }).catch(() => {})
-          await $.clock.sleep(50)
-        }
-        isAnimating = false
-      })().catch(() => {
-        isAnimating = false
-      })
+    // The spinner knows when Claude turns to thinking or to writing its reply.
+    const nextPhase = e.props.mode === 'thinking' ? 'thinking' : e.props.mode === 'responding' ? 'writing the reply' : ''
+    if (b.isTurn && nextPhase && nextPhase !== b.phase) {
+      const at = await $.clock.now()
+      b.phase = nextPhase
+      b.phaseAt = at
+      note(b, at, `[Claude is ${nextPhase}]`)
+    } else if (!nextPhase) {
+      b.phase = ''
     }
+    const now = await $.clock.now()
+    if (b.spinner !== e.requestId) b.shownAt = now
+    b.spinner = e.requestId
+    // A little narrower than the screen, so the spinner's indent never clips it.
+    b.cols = Math.max(20, Math.min(220, (e.viewport?.columns ?? 80) - 6))
+    b.drawnRows = rowsAt(b, now)
+    const cells = frameAt(b, now, b.drawnRows)
+    if (b.sceneAt === 0) b.sceneAt = now
+    animate($, b)
+
     return (
       <Box flexDirection="column">
         {spinnerLine}
-        <Raster key="oracle" columns={cols} rows={drawnRows} cells={cells} />
+        <Raster key="oracle" columns={b.cols} rows={b.drawnRows} cells={cells} />
       </Box>
     )
   })
