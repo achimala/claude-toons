@@ -28,14 +28,14 @@ they count toward your plan's usage limits like any other Claude use. On an
 API key they're billed to that key. Nothing is spent while Claude is idle or
 the cartoons are hidden.
 
-If you turn ready-made scenes off, every scene is drawn fresh and the cost goes
-up a lot:
+The "Scenes" setting picks where scenes come from:
 
-| A new scene | Extra on top of Claude Code |
+| Scenes | Extra on top of Claude Code |
 |---|---|
-| Ready-made scenes on (default) | ~1–3% |
-| Ready-made off, every 15 seconds | ~5–10% |
-| Ready-made off, as fast as possible | ~15–25% |
+| Ready-made only | Nothing. No requests are made. |
+| Mix (default) | ~1–3% |
+| Fresh only, a new scene every 15 seconds | ~5–10% |
+| Fresh only, as fast as possible | ~15–25% |
 
 `/toons settings` shows what the cartoons have actually cost you, next to
 what Claude's own work costs, once there's enough to measure.
@@ -87,10 +87,10 @@ yet. Cartoons only appear while Claude is working, and only in the terminal.
 
 | Setting | What it does |
 |---|---|
-| Ready-made scenes | On by default. Turning it off makes every scene fresh, at several times the cost. |
+| Scenes | "Ready-made only" is free. "Mix", the default, adds fresh scenes for news. "Fresh only" draws every scene new, at several times the cost. |
 | Scene styles | A mix, or only 3D, pixel art or text art, or everything but 3D. |
 | Director model | The model that draws fresh scenes. Sonnet by default. Haiku is cheaper, Opus is more inventive. |
-| New scene | How often fresh scenes may be requested when ready-made scenes are off. |
+| New scene | How often fresh scenes may be requested, in "fresh only". |
 | Director thinks | Lets the model think before each fresh scene. Off by default, since thinking costs more. |
 
 ## License

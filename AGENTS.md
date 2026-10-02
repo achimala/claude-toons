@@ -9,7 +9,12 @@ for users: install and cost. Keep technical detail here.
   pattern, and whether it failed. `prompt.submit` and `turn.complete` mark the
   turn's edges, and the spinner's mode tells when Claude turns to thinking or
   to writing its reply.
-- **Ready-made scenes.** On by default. `hooks/library.ts` reads the log for
+- **Scene sources.** The "Scenes" setting (config key `library`): "ready-made
+  only" never asks the director and spends nothing; "mix", the default, deals
+  ready-made scenes and asks the director for news; "fresh only" asks the
+  director for everything, at the pace setting. Old saved values map over:
+  on to mix, off to fresh only.
+- **Ready-made scenes.** Used in "mix" and "ready-made only". `hooks/library.ts` reads the log for
   what Claude is doing (thinking, searching, reading, editing, testing,
   building, running, git, web, agents, writing) and the file or command it
   last touched. Routine news deals a stock scene from `hooks/scenes.ts` for
@@ -22,11 +27,10 @@ for users: install and cost. Keep technical detail here.
   the rest of its deck has played. Only scenes in the styles the setting
   allows are dealt; a scene's style is what its code really calls, not what
   it was asked for.
-- **The director.** A model asked for a fresh scene. With ready-made scenes
-  on, it is asked only for news worth it (the task, a failed or denied tool,
+- **The director.** A model asked for a fresh scene. In "mix" it is asked only for news worth it (the task, a failed or denied tool,
   a scene whose code broke, or a phase with no stock in the allowed styles),
-  and at most once a minute. With them off, it is asked whenever there is
-  news, at most once per the pace setting. The log goes to the director in
+  and at most once a minute. In "fresh only" it is asked whenever there
+  is news, at most once per the pace setting. The log goes to the director in
   one conversation per session, so each request reads the earlier ones from
   the prompt cache. Only the last two scenes stay whole in the thread; older
   ones collapse to their one-line concept, a batch of six at a time so the

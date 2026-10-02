@@ -38,6 +38,13 @@ const BEAT_MS = 90_000
 // worth a scene of its own (the task, a failure, the turn's end, a broken
 // scene), and no more often than this; everything else deals a stock scene.
 const LIVE_MS = 60_000
+
+// Where scenes come from: ready-made ones only (free, nothing is requested),
+// ready-made with fresh ones for news (the default), or fresh ones only.
+const SOURCES = ['mix', 'ready-made only', 'fresh only'] as const
+type Source = (typeof SOURCES)[number]
+// Settings saved before there were three: on was the mix, off fresh only.
+const sourceOf = (v: unknown): Source => (v === 'off' ? 'fresh only' : SOURCES.includes(v as Source) ? (v as Source) : 'mix')
 // The settings pane, and the slash command that toggles the cartoons or opens it.
 const PANE = 'toons'
 const COMMAND = 'toons'
@@ -108,6 +115,9 @@ type Buddy = {
   // playing was dealt for, when the director was last asked, the concepts
   // of recent stock scenes, and how many were dealt this session.
   isStock: boolean
+  // Ready-made only: the director is never asked, and nothing is spent.
+  isFree: boolean
+  source: Source
   dealer: Dealer
   doing: Phase
   what?: string
@@ -152,9 +162,11 @@ type Buddy = {
   accruedAt: number
 }
 
-function createBuddy(model: Model, pace: Pace, isThinking: boolean, styles: StyleSet, isStock: boolean): Buddy {
+function createBuddy(model: Model, pace: Pace, isThinking: boolean, styles: StyleSet, source: Source): Buddy {
   return {
-    isStock,
+    source,
+    isStock: source !== 'fresh only',
+    isFree: source === 'ready-made only',
     dealer: createDealer(STYLE_SETS[styles]),
     doing: 'thinking',
     isLiveScene: false,
@@ -332,11 +344,12 @@ function ask($: EngineInterface, b: Buddy) {
         // playing is due for replacing, and the log waits for the director's
         // next turn: news worth it, once LIVE_MS have passed since its last.
         const isNews = Boolean(broken) || b.pending.some(isInteresting)
-        const isDue = isStockDue({ age: now - b.sceneAt, isBroken: Boolean(b.scene.code?.error), isLive: b.isLiveScene, isNewPhase: b.doing !== b.scenePhase })
+        // The waking-up scene gives way at once.
+        const isDue = isStockDue({ age: b.scene === FIRST ? Infinity : now - b.sceneAt, isBroken: Boolean(b.scene.code?.error), isLive: b.isLiveScene, isNewPhase: b.doing !== b.scenePhase })
         // The stock has nothing for this phase in the styles allowed: the
         // director draws it, at the same spacing.
         const isUnstocked = b.isStock && isDue && !SCENES.some(s => s.phase === b.doing && b.dealer.styles.includes(s.style))
-        const isLive = !b.isStock || ((isNews || isUnstocked) && now - b.liveAt >= LIVE_MS)
+        const isLive = !b.isStock || (!b.isFree && (isNews || isUnstocked) && now - b.liveAt >= LIVE_MS)
         if (!isLive || now < b.calmUntil) {
           if (b.isStock && isDue && dealStock(b, now)) $.ui.invalidate('ui.render')
           // The log keeps its task line and its latest lines.
@@ -454,7 +467,7 @@ export const register: Register = (on, options) => {
     isPace(settings.pace) ? settings.pace : 'every 15 seconds',
     settings.thinking === 'on',
     isStyleSet(settings.styles) ? settings.styles : 'mix',
-    settings.library !== 'off',
+    sourceOf(settings.library),
   )
 
   on('session.start', async ($, e, next) => {
@@ -609,9 +622,13 @@ export const register: Register = (on, options) => {
         />
         <Select
           key="library"
-          label="Ready-made scenes "
-          options={[{ value: 'on', label: 'on (cheaper: the director is asked only for news)' }, { value: 'off' }]}
-          value={b.isStock ? 'on' : 'off'}
+          label="Scenes            "
+          options={[
+            { value: 'ready-made only', label: 'ready-made only: free, no tokens used' },
+            { value: 'mix', label: 'mix: ready-made, fresh ones for news (~1-3% extra)' },
+            { value: 'fresh only', label: 'fresh only: every scene drawn new, uses far more tokens' },
+          ]}
+          value={b.source}
           onSelect={(value: string) => void setOption($, 'library', value)}
         />
         <Select
@@ -623,38 +640,49 @@ export const register: Register = (on, options) => {
         />
         <Text dimColor>Toggle any time with /toons, even while Claude works</Text>
 
-        {heading('Per hour of Claude working')}
-        {cost.claude ? row("Claude's own work", `~${money(cost.claude.usd)}`, 'measured') : row("Claude's own work", 'not measured yet', 'after ~10 min of Claude working')}
-        {row(
-          'Cartoons',
-          `~${money(cost.hour.usd)}`,
-          `~${Math.round(cost.hour.scenes)} scenes, ${cost.hour.measuredMinutes !== undefined ? `measured over ${cost.hour.measuredMinutes} min` : 'estimate'}`,
-        )}
-        {cost.claude &&
-          row('One scene', money(cost.hour.usd / Math.max(1, cost.hour.scenes)), `costs about ${cost.claude.sceneSeconds < 1 ? 'a second' : `${Math.round(cost.claude.sceneSeconds)} seconds`} of Claude's own work`)}
-        {cost.perScene &&
-          row(
-            'Per scene',
-            money(cost.perScene.usd),
-            `${Math.round(cost.perScene.outputShare * 100)}% is the scene itself (~${Math.round(cost.perScene.output)} tokens); the rest is the cached history (~${Math.round(cost.perScene.cacheRead / 1000)}k tokens, mostly cache reads)`,
-          )}
-
-        {heading('Each model at this pace')}
-        {cost.models.map(m => (
-          <Box flexDirection="row">
-            <Box width={18}>
-              <Text bold={m.model === b.model} dimColor={m.model !== b.model}>
-                {m.model === b.model ? `> ${m.name}` : `  ${m.name}`}
-              </Text>
-            </Box>
-            <Text bold={m.model === b.model} dimColor={m.model !== b.model}>{`~${money(m.usd)}/hr`}</Text>
-            <Text dimColor>{`  ~${Math.round(m.scenes)} scenes${m.usd === cheapest ? ', cheapest' : ''}`}</Text>
+        {b.isFree ? (
+          <Box flexDirection="column">
+            {heading('Cost')}
+            {row('Cartoons', 'free', 'ready-made scenes only: no requests, no tokens')}
           </Box>
-        ))}
+        ) : (
+          <Box flexDirection="column">
+            {heading('Per hour of Claude working')}
+            {cost.claude ? row("Claude's own work", `~${money(cost.claude.usd)}`, 'measured') : row("Claude's own work", 'not measured yet', 'after ~10 min of Claude working')}
+            {row(
+              'Cartoons',
+              `~${money(cost.hour.usd)}`,
+              `~${Math.round(cost.hour.scenes)} scenes, ${cost.hour.measuredMinutes !== undefined ? `measured over ${cost.hour.measuredMinutes} min` : 'estimate'}`,
+            )}
+            {cost.claude &&
+              row('One scene', money(cost.hour.usd / Math.max(1, cost.hour.scenes)), `costs about ${cost.claude.sceneSeconds < 1 ? 'a second' : `${Math.round(cost.claude.sceneSeconds)} seconds`} of Claude's own work`)}
+            {cost.perScene &&
+              row(
+                'Per scene',
+                money(cost.perScene.usd),
+                `${Math.round(cost.perScene.outputShare * 100)}% is the scene itself (~${Math.round(cost.perScene.output)} tokens); the rest is the cached history (~${Math.round(cost.perScene.cacheRead / 1000)}k tokens, mostly cache reads)`,
+              )}
+
+            {heading('Each model at this pace')}
+            {cost.models.map(m => (
+              <Box flexDirection="row">
+                <Box width={18}>
+                  <Text bold={m.model === b.model} dimColor={m.model !== b.model}>
+                    {m.model === b.model ? `> ${m.name}` : `  ${m.name}`}
+                  </Text>
+                </Box>
+                <Text bold={m.model === b.model} dimColor={m.model !== b.model}>{`~${money(m.usd)}/hr`}</Text>
+                <Text dimColor>{`  ~${Math.round(m.scenes)} scenes${m.usd === cheapest ? ', cheapest' : ''}`}</Text>
+              </Box>
+            ))}
+          </Box>
+        )}
 
         {heading('Usage')}
         {cost.windows.length > 0 && row('Your plan', cost.windows.map(w => `${w.label} ${w.percent}%`).join(' · '))}
-        {row('This session', `${b.sessionScenes} scenes · ${money(b.sessionUsd)}`, b.sessionStock > 0 ? `and ${b.sessionStock} ready-made, free` : undefined)}
+        {b.isFree
+          ? row('This session', `${b.sessionStock} ready-made scenes`, 'free')
+          : row('This session', `${b.sessionScenes} scenes · ${money(b.sessionUsd)}`, b.sessionStock > 0 ? `and ${b.sessionStock} ready-made, free` : undefined)}
         {b.lastTrouble && row('Last scene error', b.lastTrouble.slice(0, 70), 'sent back to the director to fix')}
 
         <Box marginTop={1}>
