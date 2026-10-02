@@ -18,7 +18,7 @@ Each user message starts with the strip's size, "[strip 120x9]" (columns x rows)
 - "[task] ..." is what the developer asked for.
 - "-> started Bash \`npm test\`" means Claude just launched a tool; "<- done after 12s: Bash \`npm test\`" or "<- failed: 3 tests failing ... after 12s: Bash \`npm test\`" means it finished.
 - "[Claude is thinking]" or "[Claude is writing the reply]" means Claude turned to thinking or to writing its answer.
-- "still running Bash \`npm test\` (25s so far)" or "still thinking (15s so far)" means nothing new has happened for a while. If the scene playing animates on its own (it has code, or motion that keeps going), answer {"continue": true} with everything else empty: the cheapest reply, and the scene simply keeps playing. Only when it has run out of motion, or a next beat would clearly be better (the countdown reaches 1, the crane lifts the next block), answer the next beat of the same scene: keep its set and cast and move the action along, never start over.
+- "still running Bash \`npm test\` (25s so far)" or "still thinking (15s so far)" means nothing new has happened for a while and the scene playing has run its course. Answer the next beat of the same scene: keep its world, set and cast and move the action along (the countdown reaches 1, the crane lifts the next block, night falls on the siege), never start over.
 - "[turn finished]" means Claude stopped.
 - "[your last scene's code stopped: ...]" means the code you wrote hit an error or ran out of time, and the error. Fix that mistake from now on.
 - "[recent scenes: ...]" lists the concepts of your last few scenes. Do not repeat any of them, or anything close.
@@ -34,7 +34,7 @@ What makes a scene good:
 - Vary Clawd's role and the shot, not just the props: Clawd rides, pilots, swims, digs, cooks, conducts, hides, sleeps, is chased, is tiny in a huge set, watches from a corner while the world does the work, or is mid-leap. Walking left to right is one option of many and rarely the best.
 - Some starting points, not a menu: searching is sonar sweeping, a metal detector on a beach, a sniffer dog; editing is a crane placing blocks, a tailor stitching, a surgeon; running tests is a racetrack, an exam hall, a castle siege where failures are bugs storming the walls; builds and installs are a factory conveyor or a rocket on the pad; git is trains on branching tracks; web requests are a fishing boat or a carrier pigeon; subagents are helpers hatching; waiting on a long command is a campfire at night; success is a parade, fireworks, a podium.
 - Clawd, the Claude Code mascot, stands in for Claude and is in nearly every scene: it carries the file, drives the crane, flees the bugs, climbs the podium. It may also make an entrance late, peek in from the edge, or be inside something (a submarine porthole, a cockpit). In code, Clawd can be dressed, recolored, scaled and posed (see clawd below), so give it a costume and a role that fit the world: a helmet on the construction site, a cape for the hero, a chef's hat on the cooking show, green when seasick, two Clawds of different colors as rivals. Add Clawd as an actor with kind "clawd" and frames [] (the stage draws Clawd itself in pixel art, 14 columns wide and 4 rows tall, in its own orange). Clawd animates on its own: it bobs gently and looks the way it goes whenever its x changes, and blinks when it stands still. So give Clawd motion through x and y, and put its props beside it as separate sprite actors. Every other actor has kind "sprite".
-- Everything around Clawd changes when the work changes: for new work, never reuse the metaphor, the set, or the supporting characters of any of your last five scenes. (A "still ..." beat is the exception: it continues the scene that is playing.)
+- Everything around Clawd changes when the work changes: for new work, never reuse the metaphor, the set, or the supporting characters of any of your last five scenes. (A "still ..." beat is the exception: it is the next beat of the scene that is playing.)
 - Play with the frame itself: big set pieces that fill the strip, a skyline, a parallax background scrolling slower than the foreground, a split screen, a giant thing only partly in view, a tiny world seen from far away, the whole scene scrolling past like a camera pan, a silhouette against a sunset. The strip is wide; use it.
 - Motion with intent, timed like a cartoon. You are free to choose the pace the moment calls for: a slow stakeout, a frantic chase, a rocket blasting off, an explosion, a pratfall, a leap, a long fall, a zoom across the strip. Use anticipation and payoff: a beat of stillness, then the action; things ease in and out (smoothstep) rather than starting and stopping dead. A scene can be a little story of several beats: with "show" things appear, vanish, get swapped (the closed chest becomes the open one at t=3, the bug pops when the hammer lands), and with "frame" a sprite's animation follows the action rather than looping. The one thing to avoid is aimless noise: jitter, constant wobble, everything moving at once with no focus.
 - A composed set, not a figure on an empty strip: still set pieces (fps 0) such as shelves, buildings, servers, trees, a terminal window, a track, waves, a horizon line, drawn with box drawing (─│┌┐└┘├┤┬┴┼═║╔╗╚╝), blocks (█▓▒░▀▄▌▐), braille (⣿⣶⣤⡇) and ASCII; then characters and props moving and interacting in front of them.
@@ -109,7 +109,6 @@ function frame(t, dt) {
 }
 
 Reply with one scene as JSON matching the schema:
-- continue: true to keep the scene that is playing exactly as it is (for a "still ..." update), with every other field empty; false for a new scene or a next beat.
 - concept: one short line naming the scene's world, metaphor and shot, e.g. "wild west: Clawd as sheriff nailing a wanted poster for auth.ts to a saloon wall". Decide it first.
 - code: the scene's program, or "".
 - actors: up to 20, each with kind ("clawd" or "sprite"), frames (for a sprite: 1 to 12 frames, each a string with lines separated by \\n, at most 9 lines and 80 characters wide, every frame the same size; for Clawd: []), fps (0 for a still), frame (an expression picking the frame index, wrapped to the frame count, or "" to cycle by fps), show (an expression: the actor is drawn only while it is above 0, or "" for always), x and y (expressions for the top-left cell; columns 0 to w-1, rows 0 to h-1, and anything off the strip is simply clipped), color (hex; Clawd's is "#d97757"), say ("" for nothing, else at most 60 characters), and sayAt (seconds into the scene when it starts talking).
@@ -178,10 +177,12 @@ const MOST = 60
 const KEEP = 30
 
 // Older scenes are kept only as their concept line: the last FULL replies
-// stay whole (a "still" beat continues the latest), and once BATCH more have
-// piled up behind them they are collapsed together, so the cached prefix is
-// rebuilt once per batch rather than on every request.
-const FULL = 6
+// stay whole (a "still" beat is the next beat of the latest, and a callback
+// may reach one back), and once BATCH more have piled up behind them they are
+// collapsed together, so the cached prefix is rebuilt once per batch rather
+// than on every request. Scenes are not repeated thanks to the concept lines,
+// not the whole replies, so few need keeping.
+const FULL = 2
 const BATCH = 6
 
 // A line of the log that only says something is still going.
@@ -190,7 +191,6 @@ const isQuiet = (line: string) => /^\+\d+s still /.test(line)
 const SCHEMA = {
   type: 'object',
   properties: {
-    continue: { type: 'boolean' },
     concept: { type: 'string' },
     code: { type: 'string' },
     actors: {
@@ -240,7 +240,7 @@ const SCHEMA = {
       additionalProperties: false,
     },
   },
-  required: ['continue', 'concept', 'code', 'actors', 'particles', 'background'],
+  required: ['concept', 'code', 'actors', 'particles', 'background'],
   additionalProperties: false,
 }
 
@@ -248,7 +248,7 @@ type Block = Record<string, unknown>
 type Message = { role: 'user' | 'assistant'; content: string | Block[] }
 
 // A scene, or why there is none, and what the call spent when one was made.
-export type Narration = { script?: Script; isContinued?: boolean; error?: string; spent?: CallUsage }
+export type Narration = { script?: Script; error?: string; spent?: CallUsage }
 
 export const URL = 'https://api.anthropic.com/v1/messages'
 
@@ -275,8 +275,8 @@ export function createThread(model: Model, options: { isThinking?: boolean; styl
     let activity = activityIn
     const lines = activity.split('\n').filter(line => !line.startsWith('[strip '))
     task = lines.find(line => line.startsWith('[task] ')) ?? task
-    // A scene whose code broke is not one to continue: a quiet beat after it
-    // asks for a new scene.
+    // A scene whose code broke has no next beat: a quiet beat after it asks
+    // for a new scene.
     const isBroken = lines.some(line => line.startsWith("[your last scene's code"))
     if (messages.length >= MOST) {
       const dropped = messages.slice(0, messages.length - KEEP).filter(m => m.role === 'assistant').length
@@ -291,7 +291,7 @@ export function createThread(model: Model, options: { isThinking?: boolean; styl
     else if (!first && task && !lines.includes(task)) activity = `${task}\n${activity}`
     const recent = concepts.slice(-RECENT)
     const steer = lines.length > 0 && !isBroken && lines.every(isQuiet)
-      ? [`[playing: ${recent[recent.length - 1] ?? 'the first scene'}; answer continue: true to keep it, or its next beat]`]
+      ? [`[playing: ${recent[recent.length - 1] ?? 'the first scene'}; it has run its course: answer its next beat]`]
       : [...(recent.length > 0 ? [`[recent scenes: ${recent.join(' / ')}]`] : []), `[world: ${deal(random)}]`, `[style: ${styles[Math.floor(random() * styles.length)]}]`]
     messages.push({ role: 'user', content: [activity, ...steer].join('\n') })
   }
@@ -416,8 +416,7 @@ export function createThread(model: Model, options: { isThinking?: boolean; styl
     if (reply.stop_reason === 'refusal') return { error: 'the buddy declined to draw that one', spent }
     const answer = reply.content.find(block => block.type === 'text')?.text
     try {
-      const raw = JSON.parse(typeof answer === 'string' ? answer : '') as { concept?: unknown; continue?: unknown }
-      if (raw?.continue === true) return { isContinued: true, spent }
+      const raw = JSON.parse(typeof answer === 'string' ? answer : '') as { concept?: unknown }
       if (typeof raw?.concept === 'string' && raw.concept.trim()) concepts.push(raw.concept.trim().slice(0, 140))
       const script = cleanScript(raw)
 

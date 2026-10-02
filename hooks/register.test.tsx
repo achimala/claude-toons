@@ -89,7 +89,7 @@ test('the thread is one append-only conversation, cached and on Sonnet 5.5', asy
   expect(thread.abandon()).toBe('+4s Read src/auth.ts')
 })
 
-test('new work gets a fresh world and the recent concepts; a quiet beat continues', async () => {
+test('new work gets a fresh world and the recent concepts; a quiet beat asks for the next beat', async () => {
   const thread = createThread('claude-sonnet-5-5')
   const answer = (concept: string) =>
     JSON.stringify({
@@ -108,7 +108,7 @@ test('new work gets a fresh world and the recent concepts; a quiet beat continue
   expect(thread.abandon()).toBe('[strip 80x9]\n+3s -> started Read `src/a.ts`')
   thread.ask('[strip 80x9]\n+20s still running Bash `npm test` (12s so far)')
   const quiet = JSON.parse(thread.request('bearer').body).messages[2].content as string
-  expect(quiet).toContain('[playing: deep sea: Clawd in a bathysphere; answer continue: true')
+  expect(quiet).toContain('[playing: deep sea: Clawd in a bathysphere; it has run its course: answer its next beat]')
   expect(quiet).not.toContain('[world:')
 })
 

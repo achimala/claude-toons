@@ -12,24 +12,24 @@ const scene = (concept: string) =>
 test('older scenes collapse to their concept lines, a batch at a time, the latest kept whole', () => {
   const thread = createThread('claude-sonnet-5-5')
   const replies = () => (JSON.parse(thread.request('bearer').body).messages as { role: string; content: { text: string }[] }[]).filter(m => m.role === 'assistant')
-  for (let i = 0; i < 11; i++) {
+  for (let i = 0; i < 7; i++) {
     thread.ask(`[strip 80x9]\n+${i}s -> started Read \`f${i}.ts\``)
     thread.accept(scene(`scene ${i}`))
   }
-  // Eleven whole replies: not yet a full batch behind the last six.
+  // Seven whole replies: not yet a full batch behind the last two.
   expect(replies().every(m => m.content[0]?.text.includes('function frame'))).toBe(true)
-  thread.ask('[strip 80x9]\n+12s -> started Read `g.ts`')
-  thread.accept(scene('scene 11'))
+  thread.ask('[strip 80x9]\n+8s -> started Read `g.ts`')
+  thread.accept(scene('scene 7'))
   const after = replies()
-  expect(after.length).toBe(12)
-  // The oldest six are concept lines now; the last six are whole.
+  expect(after.length).toBe(8)
+  // The oldest six are concept lines now; the last two are whole.
   expect(after.slice(0, 6).every(m => !m.content[0]?.text.includes('function frame') && m.content[0]?.text.includes('scene '))).toBe(true)
   expect(after.slice(6).every(m => m.content[0]?.text.includes('function frame'))).toBe(true)
   expect(after[0]?.content[0]?.text).toContain('scene 0')
   // Nothing more collapses until another batch has piled up.
-  thread.ask('[strip 80x9]\n+13s -> started Read `h.ts`')
-  thread.accept(scene('scene 12'))
-  expect(replies().filter(m => m.content[0]?.text.includes('function frame')).length).toBe(7)
+  thread.ask('[strip 80x9]\n+9s -> started Read `h.ts`')
+  thread.accept(scene('scene 8'))
+  expect(replies().filter(m => m.content[0]?.text.includes('function frame')).length).toBe(3)
 })
 
 test('the director skips thinking on Sonnet unless asked, and never on the models that cannot', () => {
@@ -46,20 +46,20 @@ test('the director skips thinking on Sonnet unless asked, and never on the model
   expect(body('claude-haiku-4-5').output_config.effort).toBeUndefined()
 })
 
-test('a "still running" beat invites a continue reply, which keeps the scene', () => {
+test('a "still running" beat asks for the next beat of the scene playing, in its own world', () => {
   const thread = createThread('claude-sonnet-5-5')
   thread.ask('[strip 80x9]\n[task] run the tests')
   thread.accept(scene('a siege'))
   thread.ask('[strip 80x9]\n+30s still running Bash `npm test` (30s so far)')
   const asked = JSON.parse(thread.request('bearer').body).messages.at(-1).content as string
-  expect(asked).toContain('[playing: a siege; answer continue: true')
-  const told = thread.accept(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ continue: true, concept: '', code: '', actors: [], particles: [], background: { effect: 'rain', palette: ['#0a0', '#0f0'], speed: 1, intensity: 0 } }) }], stop_reason: 'end_turn', usage: { output_tokens: 40 } }))
-  expect(told.isContinued).toBe(true)
-  expect(told.script).toBeUndefined()
-  expect(told.spent?.output).toBe(40)
-  // A continue reply adds no concept to the list of recent scenes.
+  expect(asked).toContain('[playing: a siege; it has run its course: answer its next beat]')
+  expect(asked).not.toContain('[world:')
+  expect(JSON.parse(thread.request('bearer').body).output_config.format.schema.required).not.toContain('continue')
+  const told = thread.accept(scene('a siege, night two'))
+  expect(told.script).toBeDefined()
+  // The next beat counts among the recent scenes like any other.
   thread.ask('[strip 80x9]\n+40s -> started Read `a.ts`')
-  expect(JSON.parse(thread.request('bearer').body).messages.at(-1).content).toContain('[recent scenes: a siege]')
+  expect(JSON.parse(thread.request('bearer').body).messages.at(-1).content).toContain('[recent scenes: a siege / a siege, night two]')
 })
 
 test('the styles setting decides which style a new scene is dealt', () => {
@@ -79,7 +79,7 @@ test('the styles setting decides which style a new scene is dealt', () => {
   expect(dealt('mix')).toEqual(['3D', 'pixel art', 'text art'])
 })
 
-test('a quiet beat after a scene whose code broke asks for a new scene, not a continue', () => {
+test('a quiet beat after a scene whose code broke asks for a new scene, not a next beat', () => {
   const thread = createThread('claude-sonnet-5-5')
   thread.ask('[strip 80x9]\n[task] x')
   thread.accept(scene('a broken one'))
@@ -102,14 +102,14 @@ test('editing the history drops its thinking blocks, so collapsing and cutting w
   const thread = createThread('claude-opus-5-5')
   const messages = () => JSON.parse(thread.request('bearer').body).messages as { role: string; content: string | { type: string; text?: string }[] }[]
   const thinking = () => messages().filter(m => Array.isArray(m.content) && m.content.some(b => b.type === 'thinking')).length
-  for (let i = 0; i < 11; i++) {
+  for (let i = 0; i < 7; i++) {
     thread.ask(`[strip 80x9]\n+${i}s -> started Read \`f${i}.ts\``)
     thread.accept(thought(`scene ${i}`))
   }
   // Appended only so far: every reply still holds its thinking.
-  expect(thinking()).toBe(11)
-  thread.ask('[strip 80x9]\n+12s -> started Read `g.ts`')
-  thread.accept(thought('scene 11'))
+  expect(thinking()).toBe(7)
+  thread.ask('[strip 80x9]\n+8s -> started Read `g.ts`')
+  thread.accept(thought('scene 7'))
   // The oldest six collapsed to their concepts; nothing keeps thinking now.
   const replies = messages().filter(m => m.role === 'assistant')
   expect(replies.slice(0, 6).every(m => Array.isArray(m.content) && !m.content[0]?.text?.includes('function frame'))).toBe(true)
@@ -117,8 +117,8 @@ test('editing the history drops its thinking blocks, so collapsing and cutting w
   expect(thinking()).toBe(0)
   // A cut keeps the tail without its thinking, and says the task again.
   thread.ask('[strip 80x9]\n[task] fix the build')
-  thread.accept(thought('scene 12'))
-  for (let i = 13; i < 32; i++) {
+  thread.accept(thought('scene 8'))
+  for (let i = 9; i < 32; i++) {
     thread.ask(`[strip 80x9]\n+${i}s -> started Read \`h${i}.ts\``)
     thread.accept(thought(`scene ${i}`))
   }

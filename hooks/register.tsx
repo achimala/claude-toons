@@ -28,6 +28,10 @@ const ROWS = 9
 const GROW_MS = 700
 // How long the log may stay quiet mid-turn before a "still going" line.
 const QUIET_MS = 20_000
+// How long a scene plays before a quiet stretch asks for its next beat. A
+// scene animates on its own, so until then quiet costs nothing: no request
+// is made just to hear that the scene should keep playing.
+const BEAT_MS = 90_000
 // The settings pane, and the slash command that toggles the cartoons or opens it.
 const PANE = 'toons'
 const COMMAND = 'toons'
@@ -87,10 +91,12 @@ type Buddy = {
   isAnimating: boolean
   // The last trouble toasted, so the same again is not.
   error?: string
-  // The scene playing, the one fading out, and when the scene arrived.
+  // The scene playing and when it arrived, and the one dissolving out of
+  // the picture and when that one arrived (its clock keeps running).
   scene: Script
-  previous?: Script
   sceneAt: number
+  previous?: Script
+  previousAt: number
   // The spinner being drawn on, its width, when it showed, and the rows the
   // band was last drawn with.
   spinner?: string
@@ -139,6 +145,7 @@ function createBuddy(model: Model, pace: Pace, isThinking: boolean, styles: Styl
     isAnimating: false,
     scene: FIRST,
     sceneAt: 0,
+    previousAt: 0,
     cols: 60,
     shownAt: 0,
     drawnRows: 1,
@@ -175,6 +182,7 @@ const frameAt = (b: Buddy, at: number, rows: number) =>
     script: b.scene,
     previous: b.previous,
     since: at - b.sceneAt,
+    previousSince: at - b.previousAt,
     reveal: clamp01((at - b.shownAt) / (GROW_MS * 1.6)),
   })
 
@@ -242,12 +250,15 @@ function ask($: EngineInterface, b: Buddy) {
   void (async () => {
     while (b.isTurn && b.isShown && !b.isRefused) {
       const now = await $.clock.now()
-      // A quiet stretch mid-turn is news too: what is still going on. The
-      // scene animates on its own, so one such beat per two paces is plenty.
+      // A quiet stretch mid-turn is news too, once the scene has run its
+      // course (or its code broke): what is still going on, for its next
+      // beat. Before that the scene keeps playing on its own, unasked.
       const quiet = Math.max(QUIET_MS, gapMs * 2)
+      const isSpent = Boolean(b.scene.code?.error) || now - b.sceneAt >= BEAT_MS
       if (b.pending.length === 0 && now - b.loggedAt >= quiet && now - b.lastCall >= quiet) {
         const oldest = [...b.running.values()].sort((x, y) => x.at - y.at)[0]
-        if (oldest) note(b, now, `still running ${oldest.what} (${Math.round((now - oldest.at) / 1000)}s so far)`)
+        if (!isSpent) b.loggedAt = now
+        else if (oldest) note(b, now, `still running ${oldest.what} (${Math.round((now - oldest.at) / 1000)}s so far)`)
         else if (b.phase) note(b, now, `still ${b.phase} (${Math.round((now - b.phaseAt) / 1000)}s so far)`)
         else b.loggedAt = now
       }
@@ -264,16 +275,13 @@ function ask($: EngineInterface, b: Buddy) {
         b.thread.ask(`[strip ${b.cols}x${ROWS}]\n${activity}`)
         const told = await requestScene($, b)
         if (told.spent) {
-          // A continue reply costs, but is not a scene.
           const usd = costOf(b.model, told.spent)
           const spend = bucket(b)
           spend.usd += usd
           addTokens(spend, told.spent)
           b.sessionUsd += usd
-          if (!told.isContinued) {
-            spend.scenes += 1
-            b.sessionScenes += 1
-          }
+          spend.scenes += 1
+          b.sessionScenes += 1
           // The working time so far goes with the money, so the saved rate holds
           // if the session ends mid-turn.
           accrue(b, await $.clock.now())
@@ -281,11 +289,9 @@ function ask($: EngineInterface, b: Buddy) {
         }
         if (told.script) {
           b.previous = b.scene
+          b.previousAt = b.sceneAt
           b.scene = told.script
           b.sceneAt = await $.clock.now()
-          b.error = undefined
-        } else if (told.isContinued) {
-          // The scene playing keeps playing.
           b.error = undefined
         } else {
           if (told.error && told.error !== b.error) $.ui.toast(`toons: ${told.error}`)

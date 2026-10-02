@@ -147,8 +147,10 @@ toward the same limits, each in proportion to its cost.
   reported back to the model so it can fix the mistake.
 - **Variety:** each scene names its concept. Each request lists the last six to
   avoid and deals a random world (deep sea, wild west, cooking show... 50 in
-  all) for the next scene. A "still running" update continues the current
-  scene instead of starting a new one.
+  all) for the next scene. While nothing new happens, the scene playing keeps
+  animating on its own and nothing is requested; after a minute and a half
+  on one scene, a "still running" update asks for its next beat. A new scene
+  dissolves in over the old one, cell by cell.
 - **Drawing:** a `ui.render` hook on `Spinner` keeps the engine's own spinner
   line and adds a `Raster` (a grid of colored cells) under it, repainted at
   about 20 fps with `$.ui.blit`. Empty cells show the terminal's own background,

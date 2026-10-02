@@ -808,8 +808,10 @@ export type Stage = {
   t: number
   script: Script
   previous?: Script
-  // Milliseconds since this script arrived: its actors' clock.
+  // Milliseconds since this script arrived (its actors' clock), and since
+  // the previous one did, so its code keeps its own time while it dissolves.
   since: number
+  previousSince?: number
   reveal: number
 }
 
@@ -870,6 +872,7 @@ export function stage(frame: Stage): string {
   const clear = (box: Box) => {
     for (let row = Math.max(0, box.y0); row <= Math.min(rows - 1, box.y1); row++) {
       for (let col = Math.max(0, box.x0); col <= Math.min(cols - 1, box.x1); col++) {
+        if (gate && !gate(col, row)) continue
         const at = (row * cols + col) * 3
         words[at] = 0x20
         words[at + 1] = CLEAR
@@ -878,8 +881,10 @@ export function stage(frame: Stage): string {
     }
   }
   const pack = (c: Rgb) => (Math.round(c[0]) << 16) | (Math.round(c[1]) << 8) | Math.round(c[2])
+  // While scenes dissolve, which cells this pass may touch.
+  let gate: ((col: number, row: number) => boolean) | undefined
   const put = (col: number, row: number, char: string, color: Rgb, back?: Rgb) => {
-    if (col < 0 || col >= cols || row < 0 || row >= rows || !shown(row)) return
+    if (col < 0 || col >= cols || row < 0 || row >= rows || !shown(row) || (gate && !gate(col, row))) return
     const at = (row * cols + col) * 3
     words[at] = char.codePointAt(0) ?? 0x20
     words[at + 1] = pack(color)
@@ -996,7 +1001,7 @@ export function stage(frame: Stage): string {
   // (a backdrop pixel, an earlier pixel) and shows the new one in its half.
   const plotPixel = (col: number, py: number, color: Rgb) => {
     const row = Math.floor(py / 2)
-    if (col < 0 || col >= cols || row < 0 || row >= rows || !shown(row)) return
+    if (col < 0 || col >= cols || row < 0 || row >= rows || !shown(row) || (gate && !gate(col, row))) return
     const at = (row * cols + col) * 3
     const ch = words[at]
     const fg = words[at + 1]!
@@ -1076,12 +1081,17 @@ export function stage(frame: Stage): string {
     return clawdAnchors(look)
   }
 
-  // The scene's code draws over the backdrop and swarms, under the actors.
-  const code = script.code
-  if (code?.program && !code.error) {
-    const dt = code.isStarted ? clamp(sceneT - code.lastT, 0, 0.25) : 0
-    code.lastT = sceneT
-    const globals = { t: sceneT, dt, w: cols, h: rows }
+  // A scene's code draws over the backdrop and swarms, under the actors:
+  // the outgoing scene's for a moment, dissolving cell by cell into the new
+  // one's, then the new one's. Each cell flips once, at its own moment.
+  const runCode = (play: Script, playT: number, isOutgoing: boolean) => {
+    const code = play.code
+    if (!code?.program || code.error) return
+    frame3d = undefined
+    isDirty3d = false
+    const dt = code.isStarted ? clamp(playT - code.lastT, 0, 0.25) : 0
+    code.lastT = playT
+    const globals = { t: playT, dt, w: cols, h: rows }
     let scene3d: { frame: Frame; view: View; light: Light; fog: Fog } | undefined
     canvas = {
       cols,
@@ -1141,6 +1151,7 @@ export function stage(frame: Stage): string {
       },
       say: (text, x, y, color) => {
         spend()
+        if (isOutgoing) return
         // The same line twice in a frame is one bubble.
         if (saidNow.has(text)) return
         saidNow.add(text)
@@ -1149,12 +1160,12 @@ export function stage(frame: Stage): string {
         // typed (a live count, a timer) shows whole rather than restarting.
         let first = code.said.get(text)
         if (first === undefined) {
-          const isTyped = (line: string, at: number) => (sceneT - at) * 1000 >= line.length * BUBBLE_MS
-          first = [...code.said].some(([line, at]) => isTyped(line, at)) ? -Infinity : sceneT
+          const isTyped = (line: string, at: number) => (playT - at) * 1000 >= line.length * BUBBLE_MS
+          first = [...code.said].some(([line, at]) => isTyped(line, at)) ? -Infinity : playT
           if (code.said.size >= 32) code.said.clear()
           code.said.set(text, first)
         }
-        const { lines, wide, tall } = typedBubble(text, sceneT - first, cols)
+        const { lines, wide, tall } = typedBubble(text, playT - first, cols)
         if (wide > cols || tall > rows) return
         // The speaker is the Clawd last drawn when the point is on or beside
         // it; otherwise the point itself.
@@ -1184,7 +1195,7 @@ export function stage(frame: Stage): string {
         code.isStarted = true
         code.program.start({ ...API, ...globals }, SETUP_FUEL, SETUP_MS)
       }
-      code.program.call('frame', [sceneT, dt], globals, FRAME_FUEL, FRAME_MS)
+      code.program.call('frame', [playT, dt], globals, FRAME_FUEL, FRAME_MS)
       flush3d()
     } catch (e) {
       code.error = e instanceof Error ? e.message : String(e)
@@ -1192,6 +1203,15 @@ export function stage(frame: Stage): string {
       canvas = undefined
     }
   }
+  const k = previous && since < OLD_MS ? since / OLD_MS : 1
+  const flipAt = (col: number, row: number) => hash(col * 31 + row * 7, 1)
+  if (k < 1 && previous) {
+    gate = (col, row) => flipAt(col, row) >= k
+    runCode(previous, (frame.previousSince ?? since + 30_000) / 1000, true)
+  }
+  gate = k < 1 ? (col, row) => flipAt(col, row) < k : undefined
+  runCode(script, sceneT, false)
+  gate = undefined
 
   // Actors back to front, each hiding what is behind its outline.
   placed.forEach((one, i) => {

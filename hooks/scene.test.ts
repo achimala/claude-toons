@@ -92,3 +92,33 @@ test('a blank actor still speaks, and a long word in a bubble is kept whole acro
   expect(text).toContain('supercalifragilisticexpialidoc')
   expect(text).toContain('ious')
 })
+
+test('a new code scene dissolves in cell by cell over the one before it', () => {
+  const paint = (hex: string) => cleanScript({ ...SCENE, code: `function frame(){ fill(0, 0, w, h, ' ', null, '${hex}') }` })
+  const previous = paint('#ff0000')
+  const script = paint('#0000ff')
+  if (!previous || !script) throw new Error('bad script')
+  const count = (since: number) => {
+    const words = decode(stage({ cols: 60, rows: 9, t: 0, script, previous, since, previousSince: since + 4000, reveal: 1 }))
+    let red = 0
+    let blue = 0
+    let empty = 0
+    for (let i = 0; i < 60 * 9; i++) {
+      const c = words[i * 3 + 2]
+      if (c === 0xff0000) red += 1
+      else if (c === 0x0000ff) blue += 1
+      else empty += 1
+    }
+
+    return { red, blue, empty }
+  }
+  // Just after the switch: the old scene, whole.
+  expect(count(0)).toMatchObject({ red: 540, blue: 0, empty: 0 })
+  // Halfway: a mix, with no cell left out.
+  const mid = count(250)
+  expect(mid.red).toBeGreaterThan(150)
+  expect(mid.blue).toBeGreaterThan(150)
+  expect(mid.empty).toBe(0)
+  // Done: the new scene alone, and the old one's code no longer runs.
+  expect(count(600)).toMatchObject({ red: 0, blue: 540, empty: 0 })
+})
