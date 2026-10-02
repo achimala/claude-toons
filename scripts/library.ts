@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { PHASES, STYLES, brief, styleOf, type Phase, type Style } from '../hooks/library'
-import { SCHEMA, STYLE_SETS, SYSTEM, URL as API, WORLDS, createThread } from '../hooks/narrator'
+import { SCHEMA, STYLE_SETS, URL as API, WORLDS, createThread, systemFor } from '../hooks/narrator'
 import { isModel } from '../hooks/cost'
 import { SCENES, type Stock } from '../hooks/scenes'
 import { cleanScript, stage } from '../hooks/script'
@@ -61,8 +61,9 @@ async function askAnthropic(phase: Phase, world: string, style: string): Promise
   const key = process.env.ANTHROPIC_API_KEY
   if (!key) return 'ANTHROPIC_API_KEY is not set'
   if (!isModel(model)) return `${model} is not a director model`
-  const thread = createThread(model, { styles: 'mix' })
-  thread.ask(brief(phase, world, style, 120))
+  // A prompt that knows only this style's drawing calls.
+  const thread = createThread(model, { styles: style })
+  thread.ask(brief(phase, world, 120))
   const { headers, body } = thread.request('api-key')
   const response = await fetch(API, { method: 'POST', headers: { ...headers, 'x-api-key': key }, body })
   if (!response.ok) return `API ${response.status}: ${(await response.text()).slice(0, 200)}`
@@ -101,7 +102,7 @@ async function askCodex(phase: Phase, world: string, style: string): Promise<unk
     const schemaPath = join(dir, 'schema.json')
     const outPath = join(dir, 'out.json')
     await writeFile(schemaPath, JSON.stringify(SCHEMA))
-    const prompt = `${SYSTEM}\n\n---\n\nThe message from the plugin follows. Answer with the scene as JSON only.\n\n${brief(phase, world, style, 120)}`
+    const prompt = `${systemFor([style])}\n\n---\n\nThe message from the plugin follows. Answer with the scene as JSON only.\n\n${brief(phase, world, 120)}`
     const flags = ['exec', '--ephemeral', '--skip-git-repo-check', '-s', 'read-only', '-C', dir, '--output-schema', schemaPath, '-o', outPath, ...(model ? ['-m', model] : []), '-']
     const code = await new Promise<number>(resolve => {
       const child = spawn('codex', flags, { stdio: ['pipe', 'ignore', 'ignore'] })

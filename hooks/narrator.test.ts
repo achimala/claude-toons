@@ -74,7 +74,8 @@ test('the styles setting decides which style a new scene is dealt', () => {
 
     return [...seen].sort()
   }
-  expect(dealt('3D')).toEqual(['3D'])
+  // One style is in the prompt itself: nothing to deal.
+  expect(dealt('3D')).toEqual([''])
   expect(dealt('no 3D')).toEqual(['pixel art', 'text art'])
   expect(dealt('mix')).toEqual(['3D', 'pixel art', 'text art'])
 })
@@ -139,4 +140,30 @@ test('a reset begins the conversation again with the task', () => {
   const messages = JSON.parse(thread.request('bearer').body).messages as { content: string }[]
   expect(messages.length).toBe(1)
   expect(messages[0]?.content.startsWith('[task] find bugs\n[strip 80x9]\n+9s')).toBe(true)
+})
+
+test('the prompt holds only the drawing calls of the styles allowed, and names a style only when there is a choice', () => {
+  const prompt = (styles: 'mix' | 'no 3D' | 'pixel art' | 'text art' | '3D') => {
+    const thread = createThread('claude-sonnet-5-5', { styles })
+    thread.ask('[strip 80x9]\n[task] x')
+    const body = JSON.parse(thread.request('api-key').body) as { system: { text: string }[]; messages: { content: string }[] }
+
+    return { system: body.system.map(b => b.text).join('\n'), asked: body.messages[0]?.content ?? '' }
+  }
+  const mix = prompt('mix')
+  expect(mix.system).toContain('mesh3d(')
+  expect(mix.system).toContain('pixels(x, py')
+  expect(mix.asked).toMatch(/\[style: /)
+  const flat = prompt('no 3D')
+  expect(flat.system).not.toMatch(/mesh3d|camera\(|clawd3d|3D/)
+  expect(flat.system).toContain('pixels(x, py')
+  expect(flat.asked).toMatch(/\[style: (pixel art|text art)\]/)
+  const pixel = prompt('pixel art')
+  expect(pixel.system).not.toMatch(/mesh3d|clawd3d|3D/)
+  expect(pixel.system).toContain('Every scene is drawn as pixel art')
+  expect(pixel.asked).not.toContain('[style: ')
+  const text = prompt('text art')
+  expect(text.system).not.toMatch(/mesh3d|3D|pixels\(x, py/)
+  expect(text.asked).not.toContain('[style: ')
+  expect(prompt('3D').system).toContain('mesh3d(')
 })

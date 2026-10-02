@@ -101,12 +101,11 @@ export function deal(dealer: Dealer, phase: Phase, what: string | undefined, ran
 }
 
 // The brief a generator adds to the director's prompt for one stock scene.
-export function brief(phase: Phase, world: string, style: string, cols: number) {
+export function brief(phase: Phase, world: string, cols: number) {
   return [
     `[strip ${cols}x9]`,
     `[task] (unknown: this is a ready-made scene)`,
     `This scene goes into a library of ready-made scenes, dealt whenever ${ABOUT[phase]}. No more news will come while it plays, for a minute or two, so it has to tell its own story: something happens, and keeps happening, in this world, about this kind of work. Clawd has a voice here; what it says and when is yours. The real file or command is not known: write {what} wherever a label or a line would name it, and it is filled in when the scene is dealt (up to 20 characters).`,
     `[world: ${world}]`,
-    `[style: ${style}]`,
   ].join('\n')
 }
