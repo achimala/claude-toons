@@ -19,7 +19,7 @@ import {
   type Stats,
   type Window,
 } from './cost'
-import { createDealer, deal, isInteresting, phaseOf, whatOf, type Dealer, type Phase } from './library'
+import { createDealer, deal, isInteresting, isStockDue, phaseOf, whatOf, type Dealer, type Phase } from './library'
 import { STYLE_SETS, URL, createThread, isStyleSet, type Narration, type StyleSet } from './narrator'
 import { SCENES } from './scenes'
 import { cleanScript, stage, type Script } from './script'
@@ -38,9 +38,6 @@ const BEAT_MS = 90_000
 // worth a scene of its own (the task, a failure, the turn's end, a broken
 // scene), and no more often than this; everything else deals a stock scene.
 const LIVE_MS = 60_000
-// How long a scene plays before routine news in the same phase deals the
-// next stock scene: they are written to carry a minute or two.
-const STOCK_MS = 60_000
 // The settings pane, and the slash command that toggles the cartoons or opens it.
 const PANE = 'toons'
 const COMMAND = 'toons'
@@ -115,6 +112,10 @@ type Buddy = {
   doing: Phase
   what?: string
   scenePhase?: Phase
+  // Whether the scene playing is the director's, and the tools Claude has
+  // started this turn (thinking after the first is part of the work in hand).
+  isLiveScene: boolean
+  turnTools: number
   liveAt: number
   sessionStock: number
   // The spinner being drawn on, its width, when it showed, and the rows the
@@ -156,6 +157,8 @@ function createBuddy(model: Model, pace: Pace, isThinking: boolean, styles: Styl
     isStock,
     dealer: createDealer(STYLE_SETS[styles]),
     doing: 'thinking',
+    isLiveScene: false,
+    turnTools: 0,
     liveAt: 0,
     sessionStock: 0,
     model,
@@ -220,7 +223,9 @@ function note(b: Buddy, at: number, line: string) {
   b.pending.push(`${stamp(b, at)} ${line}`)
   b.loggedAt = at
   const doing = phaseOf(line)
-  if (doing) b.doing = doing
+  // Thinking between tool calls is part of the work in hand, not a new
+  // phase; only thinking before the turn's first tool is.
+  if (doing && !(doing === 'thinking' && b.turnTools > 0)) b.doing = doing
   const what = whatOf(line)
   if (what) b.what = what
 }
@@ -244,6 +249,7 @@ function dealStock(b: Buddy, at: number) {
   if (script.code) script.code.isReported = true
   b.sessionStock += 1
   show(b, script, at)
+  b.isLiveScene = false
 
   return true
 }
@@ -317,26 +323,28 @@ function ask($: EngineInterface, b: Buddy) {
         else if (b.phase) note(b, now, `still ${b.phase} (${Math.round((now - b.phaseAt) / 1000)}s so far)`)
         else b.loggedAt = now
       }
-      if (b.pending.length > 0 && now - b.lastCall >= gapMs && now >= b.calmUntil) {
-        b.lastCall = now
+      // With the stock on, the pace does not apply: stock scenes are dealt by
+      // isStockDue, and the director is asked at most once per LIVE_MS.
+      if (b.pending.length > 0 && now - b.lastCall >= (b.isStock ? 0 : gapMs)) {
         // A scene whose code broke is news for the narrator, once.
         const broken = b.scene.code?.error && !b.scene.code.isReported ? b.scene.code : undefined
-        // With the stock on, routine news deals a stock scene when what
-        // Claude is doing has changed or the scene has played a while, and
-        // the log waits for the director's next turn: news worth it, once
-        // LIVE_MS have passed since its last scene.
+        // With the stock on, routine news deals a stock scene once the scene
+        // playing is due for replacing, and the log waits for the director's
+        // next turn: news worth it, once LIVE_MS have passed since its last.
         const isNews = Boolean(broken) || b.pending.some(isInteresting)
-        const isStale = b.doing !== b.scenePhase || now - b.sceneAt >= STOCK_MS || Boolean(b.scene.code?.error)
+        const isDue = isStockDue({ age: now - b.sceneAt, isBroken: Boolean(b.scene.code?.error), isLive: b.isLiveScene, isNewPhase: b.doing !== b.scenePhase })
         // The stock has nothing for this phase in the styles allowed: the
         // director draws it, at the same spacing.
-        const isUnstocked = b.isStock && isStale && !SCENES.some(s => s.phase === b.doing && b.dealer.styles.includes(s.style))
-        if (b.isStock && !((isNews || isUnstocked) && now - b.liveAt >= LIVE_MS)) {
-          if (isStale && dealStock(b, now)) $.ui.invalidate('ui.render')
+        const isUnstocked = b.isStock && isDue && !SCENES.some(s => s.phase === b.doing && b.dealer.styles.includes(s.style))
+        const isLive = !b.isStock || ((isNews || isUnstocked) && now - b.liveAt >= LIVE_MS)
+        if (!isLive || now < b.calmUntil) {
+          if (b.isStock && isDue && dealStock(b, now)) $.ui.invalidate('ui.render')
           // The log keeps its task line and its latest lines.
           if (b.pending.length > 60) b.pending = [...b.pending.filter(line => line.startsWith('[task] ')).slice(-1), ...b.pending.slice(-50)]
           await $.clock.sleep(400)
           continue
         }
+        b.lastCall = now
         b.liveAt = now
         if (broken) {
           broken.isReported = true
@@ -361,6 +369,7 @@ function ask($: EngineInterface, b: Buddy) {
         }
         if (told.script) {
           show(b, told.script, await $.clock.now())
+          b.isLiveScene = true
         } else {
           if (told.error && told.error !== b.error) $.ui.toast(`toons: ${told.error}`)
           b.error = told.error
@@ -484,6 +493,7 @@ export const register: Register = (on, options) => {
     b.loggedAt = now
     b.phase = ''
     b.running.clear()
+    b.turnTools = 0
     b.isTurn = true
     b.turnAt = now
     b.accruedAt = now
@@ -496,6 +506,7 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     const what = `${e.tool}${describe(e as unknown as Record<string, unknown>)}`
     const id = (b.callCount += 1)
+    if (b.isTurn) b.turnTools += 1
     const began = await $.clock.now()
     if (b.isTurn) {
       b.running.set(id, { what, at: began })

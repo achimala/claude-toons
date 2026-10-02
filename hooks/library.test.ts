@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { PHASES, STYLES, createDealer, deal, isInteresting, phaseOf, styleOf, whatOf } from './library'
+import { DWELL_MS, LIVE_DWELL_MS, PHASES, STOCK_MS, STYLES, createDealer, deal, isInteresting, isStockDue, phaseOf, styleOf, whatOf } from './library'
 import { SCENES } from './scenes'
 import { cleanScript, stage } from './script'
 
@@ -61,4 +61,21 @@ test('a dealer deals each scene of a phase once before any comes around again, i
   }
   // A phase with nothing in the styles allowed deals nothing.
   expect(deal(createDealer([]), phase, 'x')).toBeUndefined()
+})
+
+test('a scene keeps the strip for a while before a stock scene replaces it', () => {
+  const due = (age: number, over: Partial<{ isBroken: boolean; isLive: boolean; isNewPhase: boolean }> = {}) =>
+    isStockDue({ age, isBroken: false, isLive: false, isNewPhase: false, ...over })
+  // A new phase a second in changes nothing: no more half-second scenes.
+  expect(due(1000, { isNewPhase: true })).toBe(false)
+  expect(due(DWELL_MS - 1, { isNewPhase: true })).toBe(false)
+  expect(due(DWELL_MS, { isNewPhase: true })).toBe(true)
+  // The same phase keeps its scene for the full minute.
+  expect(due(DWELL_MS)).toBe(false)
+  expect(due(STOCK_MS)).toBe(true)
+  // The director's scene was paid for: it stays longer.
+  expect(due(DWELL_MS, { isNewPhase: true, isLive: true })).toBe(false)
+  expect(due(LIVE_DWELL_MS, { isNewPhase: true, isLive: true })).toBe(true)
+  // A broken scene goes at once.
+  expect(due(0, { isBroken: true })).toBe(true)
 })

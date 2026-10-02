@@ -48,6 +48,21 @@ export function phaseOf(line: string): Phase | undefined {
   return undefined
 }
 
+// How long a scene keeps the strip before a stock scene may replace it: at
+// least DWELL_MS (a fresh scene from the director, LIVE_DWELL_MS, since it
+// was paid for and is about this moment), then when the work turns to a new
+// phase, or after STOCK_MS in any case. A scene whose code broke goes at once.
+export const DWELL_MS = 20_000
+export const LIVE_DWELL_MS = 45_000
+export const STOCK_MS = 60_000
+
+export function isStockDue(scene: { age: number; isBroken: boolean; isLive: boolean; isNewPhase: boolean }) {
+  if (scene.isBroken) return true
+  if (scene.age < (scene.isLive ? LIVE_DWELL_MS : DWELL_MS)) return false
+
+  return scene.isNewPhase || scene.age >= STOCK_MS
+}
+
 // Whether a line of the log is news worth a scene of its own from the
 // director: the task, a failure, the end of the turn, a scene that broke.
 export const isInteresting = (line: string) => /^\[task\] |^\+\d+s <- (failed|denied)|^\[turn finished\]|^\[your last scene's code/.test(line)

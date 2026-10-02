@@ -13,9 +13,12 @@ for users: install and cost. Keep technical detail here.
   what Claude is doing (thinking, searching, reading, editing, testing,
   building, running, git, web, agents, writing) and the file or command it
   last touched. Routine news deals a stock scene from `hooks/scenes.ts` for
-  that phase, with `{what}` in it filled by the file or command. A new one is
-  dealt when the phase changes, after 60 seconds on one scene, or after 90
-  seconds of quiet. Each phase has a shuffled deck, so no scene repeats until
+  that phase, with `{what}` in it filled by the file or command. A scene
+  keeps the strip for at least 20 seconds (45 for one from the director),
+  then gives way when the work turns to a new phase, or after 60 seconds in
+  any case; a scene whose code broke goes at once (`isStockDue`). Thinking
+  between tool calls doesn't count as a new phase. The pace setting doesn't
+  apply to stock scenes. Each phase has a shuffled deck, so no scene repeats until
   the rest of its deck has played. Only scenes in the styles the setting
   allows are dealt; a scene's style is what its code really calls, not what
   it was asked for.
