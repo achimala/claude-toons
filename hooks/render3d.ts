@@ -466,8 +466,9 @@ export function composite(frame: Frame, put: (col: number, row: number, char: st
           sum[2] += frame.color[at * 3 + 2]!
         }
       }
-      // A cell a sprite holds is the sprite's.
-      if (covered === 0 || sprite > 0) continue
+      // A cell a sprite holds is the sprite's, unless a surface drawn since
+      // covers more of it (something passing in front of Clawd).
+      if (covered === 0 || sprite >= covered) continue
       const mean: Rgb = [sum[0] / covered, sum[1] / covered, sum[2] / covered]
       const coverage = covered / per
       if (ascii > 0) {

@@ -159,3 +159,24 @@ test('a 3D box shades, projects, and hides what is behind it', () => {
   }
   expect(lit).toBeGreaterThan(2)
 })
+
+test('a nearer mesh drawn after clawd3d covers it, and a farther one does not', () => {
+  const render = (z: number) => {
+    const script = cleanScript({ ...SCENE, code: `function frame() { clawd3d(0, 0, 0, {size: 1.5}); mesh3d(box(6, 3, 0.2), {y: 1.5, z: ${z}, color: "#ffffff"}) }` })
+    const words = decode(script ? stage({ cols: 120, rows: 9, t: 0, script, since: 100, reveal: 1 }) : '')
+    let orange = 0
+    for (let y = 0; y < 9; y++) for (let x = 0; x < 120; x++) if (colorAt(words, 120, x, y) === 0xd97757) orange += 1
+
+    return orange
+  }
+  expect(render(4)).toBe(0)
+  expect(render(-4)).toBeGreaterThan(20)
+})
+
+test('a pixel drawn over a quarter-block edge keeps the other half', () => {
+  const script = cleanScript({ ...SCENE, code: 'function frame() { put(0, 0, "▘", "#ff0000"); pixel(0, 1, "#00ff00") }' })
+  const words = decode(script ? stage({ cols: 2, rows: 1, t: 0, script, since: 100, reveal: 1 }) : '')
+  expect(charAt(words, 2, 0, 0)).toBe('▀')
+  expect(colorAt(words, 2, 0, 0)).toBe(0xff0000)
+  expect(backAt(words, 2, 0, 0)).toBe(0x00ff00)
+})

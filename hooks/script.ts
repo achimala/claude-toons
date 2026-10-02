@@ -247,6 +247,10 @@ function cleanCode(raw: unknown): Code | undefined {
   return code
 }
 
+// For the quarter blocks U+2596 to U+259F, which halves (1 top, 2 bottom)
+// hold ink: ▖▗▘▙▚▛▜▝▞▟.
+const QUARTER_HALVES = [2, 2, 1, 3, 3, 3, 3, 1, 3, 3]
+
 // Characters a sprite may hold: what one terminal cell draws at one width.
 const DRAWABLE = /[\x21-\x7e¡-ÿ←-⇿─-◿⠀-⣿★☆♥♦♣♠♪♫☺☻✓✗✦✧]/
 
@@ -883,6 +887,12 @@ export function stage(frame: Stage): string {
       top = bottom = fg
     } else if (ch === 0x20 && bg !== CLEAR) {
       top = bottom = bg
+    } else if (ch !== undefined && ch >= 0x2596 && ch <= 0x259f) {
+      // A quarter-block edge from the 3D world: each half counts as the
+      // glyph's color where the glyph has anything in it.
+      const q = QUARTER_HALVES[ch - 0x2596] ?? 0
+      if (q & 1) top = fg
+      if (q & 2) bottom = fg
     }
     if (py % 2 === 0) top = pack(color)
     else bottom = pack(color)
@@ -916,18 +926,21 @@ export function stage(frame: Stage): string {
         plotPixel(x + px.x, py + px.y, px.c)
       }
     } else {
-      // Nearest-neighbor over the sprite's box.
+      // Nearest-neighbor over the sprite's box, which reaches a pixel past
+      // each side for a claw held out.
+      const reach = s
+      const boxW = CLAWD_W * s + reach * 2
       const grid = new Map<number, Rgb>()
-      for (const px of pixels) grid.set(px.y * CLAWD_W * s + px.x, px.c)
-      const w = Math.max(1, Math.round(CLAWD_W * s * scaleTo))
+      for (const px of pixels) grid.set(px.y * boxW + px.x + reach, px.c)
+      const w = Math.max(1, Math.round(boxW * scaleTo))
       const h = Math.max(1, Math.round(CLAWD_H * s * scaleTo))
       for (let dy = 0; dy < h; dy++) {
         for (let dx = 0; dx < w; dx++) {
-          const sx = Math.min(CLAWD_W * s - 1, Math.floor(((dx + 0.5) / w) * CLAWD_W * s))
+          const sx = Math.min(boxW - 1, Math.floor(((dx + 0.5) / w) * boxW))
           const sy = Math.min(CLAWD_H * s - 1, Math.floor(((dy + 0.5) / h) * CLAWD_H * s))
-          const c = grid.get(sy * CLAWD_W * s + sx)
+          const c = grid.get(sy * boxW + sx)
           if (!c) continue
-          const col = x + dx
+          const col = x + dx - Math.round(reach * scaleTo)
           const prow = py + dy
           if (atDepth !== undefined && !claimPixel(frameOf(), col, prow, atDepth)) continue
           plotPixel(col, prow, c)
