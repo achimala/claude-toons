@@ -548,14 +548,19 @@ const API = {
     if (!feet) return null
     // The eyes: whole pixels at a size that steps with distance, so they
     // never smear with perspective, and none on a Clawd too small for them.
+    // Both sit on one row, from the point between them: projected apart, a
+    // Clawd off the camera's axis under a high camera gets one eye lower
+    // than the other, which reads as lopsided rather than as a turned face.
     const ew = Math.max(1, Math.round(s))
-    if (s * CLAWD_H >= 3) {
+    const [one, two] = points.eyes
+    const between = one && two ? place({ x: (one.x + two.x) / 2, y: (one.y + two.y) / 2, z: (one.z + two.z) / 2 }) : undefined
+    if (s * CLAWD_H >= 3 && between) {
       for (const eye of points.eyes) {
         const e = place(eye)
         if (!e) continue
         const wide = eye.kind === 'open' ? ew : 2 * ew
         const col0 = Math.round(e.x - wide / 2)
-        const row0 = 2 * Math.round((e.py - ew) / 2)
+        const row0 = 2 * Math.round((between.py - ew) / 2)
         const from = eye.kind === 'shut' ? row0 + ew : row0
         for (let prow = from; prow < row0 + 2 * ew; prow++) for (let col = col0; col < col0 + wide; col++) canvas.pixel3d(col, prow, look.eyeColor, e.depth * 0.98)
       }

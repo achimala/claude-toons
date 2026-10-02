@@ -122,3 +122,13 @@ test('a new code scene dissolves in cell by cell over the one before it', () => 
   // Done: the new scene alone, and the old one's code no longer runs.
   expect(count(600)).toMatchObject({ red: 0, blue: 540, empty: 0 })
 })
+
+test('a Clawd off the axis of a high camera keeps both eyes on one row', () => {
+  const { words, cols, error } = render('function frame(){ camera(2, 4, 5, 0, 1, 0, 70); clawd3d(-1.5, 0, 1) }')
+  expect(error).toBeUndefined()
+  const eyes = cells(words, cols, c => c === EYE)
+  expect(eyes.length).toBeGreaterThan(2)
+  const mid = (Math.min(...eyes.map(e => e.x)) + Math.max(...eyes.map(e => e.x))) / 2
+  const rows = (side: (e: { x: number }) => boolean) => [...new Set(eyes.filter(side).map(e => e.y))].sort().join(',')
+  expect(rows(e => e.x < mid)).toBe(rows(e => e.x > mid))
+})
