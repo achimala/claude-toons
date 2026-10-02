@@ -126,10 +126,13 @@ toward the same limits, each in proportion to its cost.
 - **3D:** a small renderer (`hooks/render3d.ts`). The world is sampled at
   2x4 points per cell, each sample is lit with a smoothly interpolated normal
   (diffuse plus a highlight, with creases kept sharp), and each cell is drawn
-  from its samples: solid in the lit color where a surface covers it, a block
-  glyph matching the covered quarters at edges (so they are anti-aliased), or,
-  for a mesh drawn `ascii`, the glyph whose density matches its brightness
-  (`" .,:;-=+*#%@"`), the classic terminal look. Distance fog reads as depth. Code builds boxes, spheres,
+  from its samples the way terminal image viewers do: its four quarters are
+  split into two color groups and the cell becomes the quarter-block glyph
+  of that split with a color for each group, so a cell can hold an edge or a
+  gradient; a cell of one color stays solid. A dark rim marks where depth
+  jumps, so overlapping shapes read as separate. A mesh drawn `ascii` uses
+  the glyph whose density matches its brightness (`" .,:;-=+*#%@"`), the
+  classic terminal look. Distance fog reads as depth. Code builds boxes, spheres,
   cylinders, cones, planes or its own meshes and draws them shaded or as
   wireframes; `clawd3d()` stands Clawd at a world point, sized by distance,
   and `project()` maps a world point to the strip for labels and bubbles.

@@ -439,31 +439,54 @@ const RAMP = [...' .,:;-=+*#%@']
 // top-right, 4 bottom-left, 8 bottom-right.
 const QUARTERS = [' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█']
 
-// Draws the cells drawn on since the last composite.
+// How far a sample's depth must jump from a neighbor's to count as an edge
+// (as a share of its depth), and how much the farther side darkens there:
+// a dark rim on the far side of every overlap, so shapes read as separate.
+const EDGE = 0.06
+const RIM = 0.45
+
+// Two groups closer than this (squared distance over the channels: about
+// 20 levels each) are one color: the cell stays solid rather than split.
+const ALIKE = 20 * 20 * 3
+
+// Draws the cells drawn on since the last composite. Each cell's four
+// quarters (two samples each) are split into two groups by color, and the
+// cell is the quarter-block glyph of that split with a color for each
+// group, so a cell can hold an edge, or a gradient, with two colors.
 export function composite(frame: Frame, put: (col: number, row: number, char: string, color: Rgb, back?: Rgb) => void) {
   const per = SX * SY
+  const half = SY / 2
   for (let row = 0; row < frame.rows; row++) {
     for (let col = 0; col < frame.cols; col++) {
       const cell = row * frame.cols + col
       if (!frame.dirty[cell]) continue
       frame.dirty[cell] = 0
+      // Per quarter: samples covered, their summed color; and the cell's.
+      const qCount = [0, 0, 0, 0]
+      const qSum: Rgb[] = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]
       let covered = 0
       let sprite = 0
       let ascii = 0
-      let quarters = 0
       const sum: Rgb = [0, 0, 0]
       for (let dy = 0; dy < SY; dy++) {
         for (let dx = 0; dx < SX; dx++) {
-          const at = (row * SY + dy) * frame.w + col * SX + dx
+          const x = col * SX + dx
+          const y = row * SY + dy
+          const at = y * frame.w + x
           const owner = frame.owner[at]!
           if (owner === SPRITE) sprite += 1
           if (!isSurface(owner)) continue
           if (owner === ASCII) ascii += 1
+          const c = rimmed(frame, x, y, at)
+          const q = (dy < half ? 0 : 2) + (dx < SX / 2 ? 0 : 1)
+          qCount[q] = (qCount[q] ?? 0) + 1
+          qSum[q]![0] += c[0]
+          qSum[q]![1] += c[1]
+          qSum[q]![2] += c[2]
           covered += 1
-          quarters |= 1 << ((dy < SY / 2 ? 0 : 2) + (dx < SX / 2 ? 0 : 1))
-          sum[0] += frame.color[at * 3]!
-          sum[1] += frame.color[at * 3 + 1]!
-          sum[2] += frame.color[at * 3 + 2]!
+          sum[0] += c[0]
+          sum[1] += c[1]
+          sum[2] += c[2]
         }
       }
       // A cell a sprite holds is the sprite's, unless a surface drawn since
@@ -479,16 +502,81 @@ export function composite(frame: Frame, put: (col: number, row: number, char: st
         const level = Math.min(RAMP.length - 1, Math.round(Math.pow(brightness, 0.6) * coverage * (RAMP.length - 1)))
         const back: Rgb | undefined = coverage >= 0.5 ? [mean[0] * 0.18, mean[1] * 0.18, mean[2] * 0.18] : undefined
         put(col, row, RAMP[Math.max(1, level)] ?? '.', lift(mean), back)
-      } else if (coverage >= 0.75) {
-        // Solid: the lit color fills the cell.
+        continue
+      }
+      const qMean: (Rgb | undefined)[] = qCount.map((n, q) => (n > 0 ? [qSum[q]![0] / n, qSum[q]![1] / n, qSum[q]![2] / n] : undefined))
+      const onMask = qMean.reduce((m, c, q) => (c ? m | (1 << q) : m), 0)
+      // The split of the covered quarters into two color groups that keeps
+      // each group most alike; the uncovered quarters always sit in the
+      // second group, which draws as the background.
+      let best = onMask
+      let bestCost = Infinity
+      for (let mask = 1; mask <= onMask; mask++) {
+        if ((mask & onMask) !== mask) continue
+        const a = groupMean(qMean, mask)
+        const b = groupMean(qMean, onMask & ~mask)
+        let cost = 0
+        for (let q = 0; q < 4; q++) {
+          const c = qMean[q]
+          if (!c) continue
+          const g = mask & (1 << q) ? a : b
+          cost += g ? dist(c, g) : 0
+        }
+        if (cost < bestCost - 1e-9) {
+          bestCost = cost
+          best = mask
+        }
+      }
+      const fg = groupMean(qMean, best) ?? mean
+      const rest = onMask & ~best
+      const bg = groupMean(qMean, rest)
+      if (onMask === 15 && (best === 15 || (bg && dist(fg, bg) < ALIKE))) {
+        // Four quarters of much the same color: a solid cell.
         put(col, row, ' ', mean, mean)
+      } else if (best === 15) {
+        // Four quarters of one color: a solid cell.
+        put(col, row, ' ', fg, fg)
+      } else if (bg && bitCount(rest) > bitCount(~onMask & 15)) {
+        // The second group covers more than the uncovered part: two colors.
+        put(col, row, QUARTERS[best] ?? '█', fg, bg)
       } else {
-        // An edge: the block glyph for the covered quarters, the rest left to
-        // whatever is behind.
-        put(col, row, QUARTERS[quarters] ?? '█', mean)
+        put(col, row, QUARTERS[best] ?? '█', fg)
       }
     }
   }
+}
+
+// A sample's color, darkened where its depth jumps away from a neighbor's
+// to the left or above (the far side of an overlap).
+function rimmed(frame: Frame, x: number, y: number, at: number): Rgb {
+  const c: Rgb = [frame.color[at * 3]!, frame.color[at * 3 + 1]!, frame.color[at * 3 + 2]!]
+  const d = frame.depth[at]!
+  let isRim = false
+  for (const n of [x > 0 ? at - 1 : -1, y > 0 ? at - frame.w : -1, x + 1 < frame.w ? at + 1 : -1, y + 1 < frame.h ? at + frame.w : -1]) {
+    if (n < 0 || !isSurface(frame.owner[n]!)) continue
+    if (d - frame.depth[n]! > EDGE * d) isRim = true
+  }
+
+  return isRim ? [c[0] * RIM, c[1] * RIM, c[2] * RIM] : c
+}
+
+const bitCount = (m: number) => ((m & 1) + ((m >> 1) & 1) + ((m >> 2) & 1) + ((m >> 3) & 1))
+
+const dist = (a: Rgb, b: Rgb) => (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2
+
+function groupMean(q: (Rgb | undefined)[], mask: number): Rgb | undefined {
+  const sum: Rgb = [0, 0, 0]
+  let n = 0
+  for (let i = 0; i < 4; i++) {
+    const c = q[i]
+    if (!(mask & (1 << i)) || !c) continue
+    sum[0] += c[0]
+    sum[1] += c[1]
+    sum[2] += c[2]
+    n += 1
+  }
+
+  return n > 0 ? [sum[0] / n, sum[1] / n, sum[2] / n] : undefined
 }
 
 // Ink that stays visible: the color brightened toward its hue when dark.
