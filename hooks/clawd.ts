@@ -5,6 +5,7 @@
 // they can hang a hat on it or put a prop in its hand.
 
 import type { Rgb } from './effects'
+import type { Mesh } from './render3d'
 
 export const CLAWD_W = 14
 export const CLAWD_H = 8
@@ -175,5 +176,88 @@ export function clawdAnchors(look: ClawdLook): Anchors {
     right: { x: (CLAWD_W - 1 - rightTip[0]) * s + (s - 1), y: (rightTip[1] + drop) * s },
     feet: { x: Math.floor((CLAWD_W / 2) * s), y: CLAWD_H * s },
     eyes: { x: EYES[0]! * s, y: (EYE_ROW + drop) * s, w: (EYES[1]! - EYES[0]! + 1) * s },
+  }
+}
+
+// Clawd as a solid for 3D scenes, in the sprite's pixel units: x across its
+// middle, y up from its feet, z toward the viewer. The body is the sprite's
+// outline as a block as deep as it is tall, with feet at its corners and the
+// claws beside it. The eyes are not part of it: a scene draws them flat on
+// its face, where clawdPoints puts them.
+const meshes = new Map<string, Mesh>()
+const BODY_DEPTH = 3
+
+export function clawdMesh(look: ClawdLook): Mesh {
+  const drop = look.pose === 'sit' ? CLAWD_H - BODY_H : 0
+  const beat = look.pose === 'walk' ? ((Math.round(look.stride) % 4) + 4) % 4 : -1
+  const key = `${look.pose}|${beat}|${look.arms.left}|${look.arms.right}`
+  const done = meshes.get(key)
+  if (done) return done
+  const verts: number[] = []
+  const faces: number[] = []
+  const vert = (x: number, y: number, z: number) => {
+    verts.push(x, y, z)
+
+    return verts.length / 3 - 1
+  }
+  const poly = (ids: number[]) => {
+    for (let i = 1; i + 1 < ids.length; i++) faces.push(ids[0]!, ids[i]!, ids[i + 1]!)
+  }
+  const block = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number) => {
+    const c = [vert(x0, y0, z0), vert(x1, y0, z0), vert(x1, y1, z0), vert(x0, y1, z0), vert(x0, y0, z1), vert(x1, y0, z1), vert(x1, y1, z1), vert(x0, y1, z1)]
+    for (const q of [[0, 1, 2, 3], [5, 4, 7, 6], [4, 0, 3, 7], [1, 5, 6, 2], [3, 2, 6, 7], [4, 5, 1, 0]]) poly(q.map(i => c[i]!))
+  }
+  // The body: 12 wide, 10 at its top and bottom rows, as a chamfered prism.
+  const bottom = CLAWD_H - BODY_H - drop
+  const top = CLAWD_H - drop
+  const outline: [number, number][] = [[-5, bottom], [5, bottom], [6, bottom + 1], [6, top - 1], [5, top], [-5, top], [-6, top - 1], [-6, bottom + 1]]
+  const front = outline.map(([x, y]) => vert(x, y, BODY_DEPTH))
+  const back = outline.map(([x, y]) => vert(x, y, -BODY_DEPTH))
+  poly(front)
+  poly([...back].reverse())
+  for (let i = 0; i < outline.length; i++) {
+    const j = (i + 1) % outline.length
+    poly([front[i]!, back[i]!, back[j]!, front[j]!])
+  }
+  // Feet at the corners; walking lifts one diagonal pair, then the other.
+  if (look.pose !== 'sit') {
+    for (const [fx, fz, diagonal] of [[-2.5, 1.5, 0], [2.5, -1.5, 0], [-2.5, -1.5, 1], [2.5, 1.5, 1]] as const) {
+      const isLifted = look.pose === 'jump' || (beat === 1 && diagonal === 0) || (beat === 3 && diagonal === 1)
+      block(fx - 0.5, fx + 0.5, isLifted ? 1 : 0, bottom, fz - 0.5, fz + 0.5)
+    }
+  }
+  // The claws, each pixel a block, mirrored for the right side.
+  for (const [side, arm] of [[-1, look.arms.left], [1, look.arms.right]] as const) {
+    for (const [px, py] of CLAWS[arm].pixels) {
+      const col = side < 0 ? px : CLAWD_W - 1 - px
+      block(col - CLAWD_W / 2, col - CLAWD_W / 2 + 1, CLAWD_H - py - 1 - drop, CLAWD_H - py - drop, -0.5, 0.5)
+    }
+  }
+  const mesh = { verts, faces }
+  meshes.set(key, mesh)
+
+  return mesh
+}
+
+// Where things attach on the solid, in its pixel units (z toward the viewer):
+// above the head, the claw tips, under the feet, and the eyes on its face,
+// each eye's center with how it looks (open, wide, or shut as a line), and
+// the span the two eyes cover.
+export function clawdPoints(look: ClawdLook) {
+  const drop = look.pose === 'sit' ? CLAWD_H - BODY_H : 0
+  const ex = Math.max(-1, Math.min(1, Math.round(look.look.x))) || look.facing
+  const ey = Math.max(-1, Math.min(1, Math.round(look.look.y)))
+  const half = CLAWD_W / 2
+  const tipAt = (side: number, tip: [number, number]) => ({ x: (side < 0 ? tip[0] : CLAWD_W - 1 - tip[0]) + 0.5 - half + (side < 0 ? -0.5 : 0.5), y: CLAWD_H - tip[1] - 0.5 - drop, z: 0 })
+  const eyeY = CLAWD_H - EYE_ROW - ey - 1 - drop
+  const shut = look.eyes === 'closed' || look.isBlinking
+
+  return {
+    top: { x: 0, y: CLAWD_H - drop, z: 0 },
+    left: tipAt(-1, CLAWS[look.arms.left].tip),
+    right: tipAt(1, CLAWS[look.arms.right].tip),
+    feet: { x: 0, y: 0, z: 0 },
+    eyes: EYES.map(col => ({ x: col + ex + 0.5 - half, y: eyeY, z: BODY_DEPTH, kind: shut ? ('shut' as const) : look.eyes === 'wide' ? ('wide' as const) : ('open' as const) })),
+    eyeSpan: { x: EYES[0]! + ex - half, y: eyeY, z: BODY_DEPTH, w: EYES[1]! - EYES[0]! + 1 },
   }
 }

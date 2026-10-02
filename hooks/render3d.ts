@@ -62,6 +62,8 @@ export type Frame = {
   // Cells with surface samples drawn since the last composite.
   dirty: Uint8Array
   triangles: number
+  // Called for every triangle or edge drawn, so the caller can keep time.
+  tick?: () => void
 }
 
 export const createFrame = (cols: number, rows: number): Frame => {
@@ -173,41 +175,52 @@ function clipNear(poly: Vertex[]): Vertex[] {
 // ---------------------------------------------------------------- meshes
 
 export function transformPoint(t: Transform, p: Vec3): Vec3 {
-  const [x, y, z] = rotate(t.rot, [p[0] * t.scale[0], p[1] * t.scale[1], p[2] * t.scale[2]])
+  return placed(t, rotation(t.rot), p)
+}
+
+const placed = (t: Transform, m: Mat3, p: Vec3): Vec3 => {
+  const [x, y, z] = apply(m, [p[0] * t.scale[0], p[1] * t.scale[1], p[2] * t.scale[2]])
 
   return [x + t.at[0], y + t.at[1], z + t.at[2]]
 }
 
-function rotate(rot: Vec3, p: Vec3): Vec3 {
-  let [x, y, z] = p
-  const [rx, ry, rz] = rot
-  if (rx) {
-    const c = Math.cos(rx)
-    const s = Math.sin(rx)
-    ;[y, z] = [y * c - z * s, y * s + z * c]
-  }
-  if (ry) {
-    const c = Math.cos(ry)
-    const s = Math.sin(ry)
-    ;[x, z] = [x * c + z * s, -x * s + z * c]
-  }
-  if (rz) {
-    const c = Math.cos(rz)
-    const s = Math.sin(rz)
-    ;[x, y] = [x * c - y * s, x * s + y * c]
-  }
+// A rotation as a row-major 3x3 matrix, built once per mesh rather than
+// six trig calls per point.
+type Mat3 = [number, number, number, number, number, number, number, number, number]
 
-  return [x, y, z]
+// Rz * Ry * Rx, so x applies first.
+const rotation = (rot: Vec3): Mat3 => {
+  const [cx, sx, cy, sy, cz, sz] = [Math.cos(rot[0]), Math.sin(rot[0]), Math.cos(rot[1]), Math.sin(rot[1]), Math.cos(rot[2]), Math.sin(rot[2])]
+
+  return [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx, sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx, -sy, cy * sx, cy * cx]
 }
+
+const apply = (m: Mat3, p: Vec3): Vec3 => [
+  m[0] * p[0] + m[1] * p[1] + m[2] * p[2],
+  m[3] * p[0] + m[4] * p[1] + m[5] * p[2],
+  m[6] * p[0] + m[7] * p[1] + m[8] * p[2],
+]
+
+// A normal under a transform: the inverse of the scale (a squashed sphere's
+// normals lean out, not along the squash), then the rotation.
+const transformNormal = (t: Transform, m: Mat3, n: Vec3): Vec3 =>
+  apply(m, norm([n[0] / (t.scale[0] || 1), n[1] / (t.scale[1] || 1), n[2] / (t.scale[2] || 1)]))
 
 // A mesh with a normal for each corner of each face: faces meeting at a
 // gentle angle share smoothed normals (a sphere looks round), faces meeting
-// at a crease keep their own (a cube stays sharp).
-type Prepared = { faceNormals: Vec3[]; cornerNormals: Vec3[] }
+// at a crease keep their own (a cube stays sharp). And its edges to draw as
+// wire, each once: two vertex indices per edge, without the seams inside
+// flat polygons (the diagonal of a triangulated quad).
+type Prepared = { faceNormals: Vec3[]; cornerNormals: Vec3[]; edges: number[] }
 const prepared = new WeakMap<Mesh, Prepared>()
 const CREASE = Math.cos((50 * Math.PI) / 180)
+const FLAT = 0.999
+// The most faces around one vertex that smoothing considers: a real mesh has
+// a handful; a mesh of thousands of faces on three vertices would otherwise
+// cost the square of its size to prepare.
+const MOST_AROUND = 24
 
-function prepare(mesh: Mesh): Prepared {
+export function prepare(mesh: Mesh): Prepared {
   const done = prepared.get(mesh)
   if (done) return done
   const { verts, faces } = mesh
@@ -220,7 +233,7 @@ function prepare(mesh: Mesh): Prepared {
     faceNormals.push(norm(cross(sub(at(b), at(a)), sub(at(c), at(a)))))
     for (const i of [a, b, c]) {
       const list = around.get(i) ?? []
-      list.push(f)
+      if (list.length < MOST_AROUND) list.push(f)
       around.set(i, list)
     }
   }
@@ -241,7 +254,26 @@ function prepare(mesh: Mesh): Prepared {
       cornerNormals.push(norm(sum))
     }
   }
-  const result = { faceNormals, cornerNormals }
+  // Edges keyed by their two indices as one number (the index count is
+  // bounded, so this is exact), each with the faces along it.
+  const span = Math.floor(verts.length / 3) + 1
+  const edgeFaces = new Map<number, number[]>()
+  for (let f = 0; f < count; f++) {
+    for (let k = 0; k < 3; k++) {
+      const a = faces[f * 3 + k]!
+      const b = faces[f * 3 + ((k + 1) % 3)]!
+      const key = Math.min(a, b) * span + Math.max(a, b)
+      const along = edgeFaces.get(key)
+      if (along) along.push(f)
+      else edgeFaces.set(key, [f])
+    }
+  }
+  const edges: number[] = []
+  for (const [key, along] of edgeFaces) {
+    if (along.length === 2 && dot(faceNormals[along[0]!]!, faceNormals[along[1]!]!) > FLAT) continue
+    edges.push(Math.floor(key / span), key % span)
+  }
+  const result = { faceNormals, cornerNormals, edges }
   prepared.set(mesh, result)
 
   return result
@@ -287,7 +319,9 @@ function fillTriangle(frame: Frame, view: View, fog: Fog, l: Vec3, ambient: numb
   const b = toScreen(view, B.v)
   const c = toScreen(view, C.v)
   const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
-  if (Math.abs(area) < 1e-9) return
+  // A triangle too thin to show, or one with a corner at infinity (its
+  // weights would be NaN and own every sample).
+  if (!(Math.abs(area) >= 1e-9) || !Number.isFinite(a.x + a.y + b.x + b.y + c.x + c.y)) return
   const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x, c.x)))
   const x1 = Math.min(frame.w - 1, Math.ceil(Math.max(a.x, b.x, c.x)))
   const y0 = Math.max(0, Math.floor(Math.min(a.y, b.y, c.y)))
@@ -341,15 +375,42 @@ export function drawLine(frame: Frame, view: View, fog: Fog, p0: Vec3, p1: Vec3,
   if (ends.length < 2) return
   const a = toScreen(view, ends[0]!.v)
   const b = toScreen(view, ends[1]!.v)
-  const steps = Math.min(1200, Math.ceil(Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y))) || 1)
+  // Only the part on screen is stepped, a sample at a time, with the step
+  // still a share of the whole segment so depth follows it correctly: an
+  // end cut at the near plane can project miles off-screen, and spreading
+  // a fixed count of steps over that leaves gaps in the part that shows.
+  const span = clipSpan(a.x, a.y, b.x, b.y, frame.w, frame.h)
+  if (!span) return
+  const [k0, k1] = span
+  const steps = Math.min(frame.w + frame.h, Math.ceil(Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y)) * (k1 - k0)) || 1)
   for (let i = 0; i <= steps; i++) {
-    const k = i / steps
+    const k = k0 + ((k1 - k0) * i) / steps
     const x = Math.floor(a.x + (b.x - a.x) * k)
     const y = Math.floor(a.y + (b.y - a.y) * k)
     const depth = 1 / ((1 - k) / a.depth + k / b.depth)
     // A little nearer than the surface it lies on, so edges show on faces.
     dab(frame, x, y, depth - 0.03, fogged(color, fog, depth))
   }
+}
+
+// The share of a segment inside the frame (Liang-Barsky), as the parameters
+// where it enters and leaves, or undefined when it misses. A sample of
+// margin keeps the dabs that straddle the frame's edge.
+function clipSpan(x0: number, y0: number, x1: number, y1: number, w: number, h: number): [number, number] | undefined {
+  let k0 = 0
+  let k1 = 1
+  for (const [p, dp, hi] of [[x0, x1 - x0, w], [y0, y1 - y0, h]] as const) {
+    if (dp === 0) {
+      if (p < -1 || p > hi) return undefined
+      continue
+    }
+    const ka = (-1 - p) / dp
+    const kb = (hi - p) / dp
+    k0 = Math.max(k0, Math.min(ka, kb))
+    k1 = Math.min(k1, Math.max(ka, kb))
+  }
+
+  return k0 <= k1 ? [k0, k1] : undefined
 }
 
 export function drawPoint(frame: Frame, view: View, fog: Fog, p: Vec3, color: Rgb) {
@@ -375,14 +436,28 @@ function dab(frame: Frame, x: number, y: number, depth: number, color: Rgb) {
 // Draws a mesh placed by a transform: filled and lit, or as wire edges.
 export function drawMesh(frame: Frame, view: View, light: Light, fog: Fog, mesh: Mesh, t: Transform, style: Style) {
   const { verts, faces } = mesh
-  const { cornerNormals } = prepare(mesh)
+  const { cornerNormals, edges } = prepare(mesh)
+  const m = rotation(t.rot)
   const n = Math.floor(verts.length / 3)
   const world: Vec3[] = []
   const eyed: ViewPoint[] = []
   for (let i = 0; i < n; i++) {
-    const p = transformPoint(t, [verts[i * 3]!, verts[i * 3 + 1]!, verts[i * 3 + 2]!])
+    const p = placed(t, m, [verts[i * 3]!, verts[i * 3 + 1]!, verts[i * 3 + 2]!])
     world.push(p)
     eyed.push(toView(view, p))
+  }
+  if (style.wire) {
+    // Each edge once; an edge counts against the triangle budget.
+    for (let e = 0; e + 1 < edges.length && frame.triangles < MOST_TRIANGLES; e += 2) {
+      const a = world[edges[e]!]
+      const b = world[edges[e + 1]!]
+      if (!a || !b) continue
+      frame.triangles += 1
+      frame.tick?.()
+      drawLine(frame, view, fog, a, b, style.color)
+    }
+
+    return
   }
   const l = norm(light.dir)
   const faceCount = Math.floor(faces.length / 3)
@@ -393,17 +468,12 @@ export function drawMesh(frame: Frame, view: View, light: Light, fog: Fog, mesh:
       const v = eyed[ids[k]!]
       const p = world[ids[k]!]
       if (!v || !p) break
-      corners.push({ v, p, n: rotate(t.rot, cornerNormals[f * 3 + k] ?? [0, 1, 0]) })
+      corners.push({ v, p, n: transformNormal(t, m, cornerNormals[f * 3 + k] ?? [0, 1, 0]) })
     }
     if (corners.length < 3) continue
     if (corners.every(c => c.v.d < NEAR)) continue
     frame.triangles += 1
-    if (style.wire) {
-      drawLine(frame, view, fog, corners[0]!.p, corners[1]!.p, style.color)
-      drawLine(frame, view, fog, corners[1]!.p, corners[2]!.p, style.color)
-      drawLine(frame, view, fog, corners[2]!.p, corners[0]!.p, style.color)
-      continue
-    }
+    frame.tick?.()
     const poly = clipNear(corners)
     for (let j = 1; j + 1 < poly.length; j++) fillTriangle(frame, view, fog, l, light.ambient, [poly[0]!, poly[j]!, poly[j + 1]!], style)
   }
@@ -547,15 +617,39 @@ export function composite(frame: Frame, put: (col: number, row: number, char: st
 }
 
 // A sample's color, darkened where its depth jumps away from a neighbor's
-// to the left or above (the far side of an overlap).
+// (the far side of an overlap). Depth is compared as 1/depth, which runs
+// straight across a flat surface on screen, so only a kink counts, not a
+// slope: a floor receding steadily toward the horizon gets no rim, a nearer
+// shape in front of it does. Along each axis the kink is how far this
+// sample sits beyond where its neighbors' trend puts it; at a surface's
+// border the trend comes from the two samples on the one side it has, so a
+// limb curving away still rims where a flat floor's far edge does not.
 function rimmed(frame: Frame, x: number, y: number, at: number): Rgb {
   const c: Rgb = [frame.color[at * 3]!, frame.color[at * 3 + 1]!, frame.color[at * 3 + 2]!]
-  const d = frame.depth[at]!
-  let isRim = false
-  for (const n of [x > 0 ? at - 1 : -1, y > 0 ? at - frame.w : -1, x + 1 < frame.w ? at + 1 : -1, y + 1 < frame.h ? at + frame.w : -1]) {
-    if (n < 0 || !isSurface(frame.owner[n]!)) continue
-    if (d - frame.depth[n]! > EDGE * d) isRim = true
+  const i = 1 / frame.depth[at]!
+  // 1/depth of the surface sample k steps along an axis, if there is one.
+  const along = (dx: number, dy: number, k: number) => {
+    const sx = x + dx * k
+    const sy = y + dy * k
+    if (sx < 0 || sx >= frame.w || sy < 0 || sy >= frame.h) return undefined
+    const n = sy * frame.w + sx
+
+    return isSurface(frame.owner[n]!) ? 1 / frame.depth[n]! : undefined
   }
+  const kink = (dx: number, dy: number) => {
+    const a = along(dx, dy, 1)
+    const b = along(dx, dy, -1)
+    if (a !== undefined && b !== undefined) return a + b - 2 * i
+    const side = a !== undefined ? 1 : b !== undefined ? -1 : 0
+    if (side === 0) return 0
+    const near = along(dx, dy, side)!
+    const beyond = along(dx, dy, 2 * side)
+    // Two samples wide there is no trend to go by: the jump alone decides.
+    if (beyond === undefined) return near - i > EDGE * near ? Infinity : 0
+
+    return 2 * near - beyond - i
+  }
+  const isRim = kink(1, 0) > EDGE * i || kink(0, 1) > EDGE * i
 
   return isRim ? [c[0] * RIM, c[1] * RIM, c[2] * RIM] : c
 }

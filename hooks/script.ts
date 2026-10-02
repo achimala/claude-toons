@@ -17,12 +17,13 @@ import {
   type Background,
   type Rgb,
 } from './effects'
-import { ARMS, CLAWD_H, CLAWD_ORANGE, CLAWD_W, LOOK, clawdAnchors, clawdPixels, type Anchors, type Arm, type ClawdLook, type Eyes, type Pose } from './clawd'
-import { obj, parseProgram, type Program } from './lang'
+import { ARMS, CLAWD_H, CLAWD_ORANGE, CLAWD_W, LOOK, clawdAnchors, clawdMesh, clawdPixels, clawdPoints, type Anchors, type Arm, type ClawdLook, type Eyes, type Pose } from './clawd'
+import { ScriptError, obj, parseProgram, type Program } from './lang'
 import {
   DEFAULT_CAMERA,
   DEFAULT_FOG,
   DEFAULT_LIGHT,
+  MOST_TRIANGLES,
   SX,
   SY,
   box,
@@ -236,6 +237,10 @@ export type Script = {
 // and calls. A frame over budget stops the code, not the strip.
 const SETUP_FUEL = 1_000_000
 const FRAME_FUEL = 150_000
+// Fuel bounds the code's own steps; this bounds the drawing it asks for.
+const FRAME_MS = 80
+// The setup may build a world; it gets longer, once.
+const SETUP_MS = 500
 
 function cleanCode(raw: unknown): Code | undefined {
   if (typeof raw !== 'string' || !raw.trim()) return undefined
@@ -324,22 +329,44 @@ type Canvas = {
   // One pixel: a column and a pixel row (two to a cell).
   pixel: (col: number, py: number, color: Rgb) => void
   // Clawd with its top-left at a column and a pixel row; where things attach.
-  clawd: (x: number, py: number, look: ClawdLook, scaleTo?: number, depth?: number) => Anchors
+  clawd: (x: number, py: number, look: ClawdLook) => Anchors
+  // One pixel in the 3D world: drawn where nothing nearer has been.
+  pixel3d: (col: number, py: number, color: Rgb, depth: number) => void
+  // The cells a Clawd drawn some other way covers, for its speech.
+  mark: (box: Box) => void
   say: (text: string, x: number, y: number, color: Rgb) => void
-  // The frame's 3D world, made on first use.
-  scene3d: () => { frame: Frame; view: View; light: Light; fog: Fog }
+  // The frame's 3D world, made on first use; drawing in it is noted.
+  scene3d: (isDrawing?: boolean) => { frame: Frame; view: View; light: Light; fog: Fog }
 }
 let canvas: Canvas | undefined
 
-// A color from the code: 0xRRGGBB, "#rrggbb" or "#rgb".
-const colorOf = (c: unknown, fallback: Rgb = [255, 255, 255]): Rgb =>
-  typeof c === 'number' && Number.isFinite(c) ? [(c >> 16) & 255, (c >> 8) & 255, c & 255] : isColor(c) ? parseHex(c) : fallback
+// A color from the code: 0xRRGGBB, "#rrggbb" or "#rgb". A string is parsed
+// once and remembered, since a fill names the same one for every cell.
+const COLORS = new Map<string, Rgb>()
+const colorOf = (c: unknown, fallback: Rgb = [255, 255, 255]): Rgb => {
+  if (typeof c === 'number' && Number.isFinite(c)) return [(c >> 16) & 255, (c >> 8) & 255, c & 255]
+  if (typeof c !== 'string') return fallback
+  let rgb = COLORS.get(c)
+  if (!rgb) {
+    if (!isColor(c)) return fallback
+    if (COLORS.size >= 512) COLORS.clear()
+    rgb = parseHex(c)
+    COLORS.set(c, rgb)
+  }
+
+  return [rgb[0], rgb[1], rgb[2]]
+}
+// Text from the code: a plain object (which has no toString in the sandbox)
+// or an array reads as it would in JavaScript rather than throwing.
+const strOf = (v: unknown): string =>
+  v === null || v === undefined ? '' : typeof v === 'object' ? (Array.isArray(v) ? v.slice(0, 400).map(strOf).join(',') : '[object Object]') : String(v)
 const packRgb = (r: number, g: number, b: number) =>
   (clamp(Math.round(r), 0, 255) << 16) | (clamp(Math.round(g), 0, 255) << 8) | clamp(Math.round(b), 0, 255)
 const num = (v: unknown, fallback = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : fallback)
 // One drawable character, or undefined.
 const charOf = (c: unknown) => {
-  const first = [...String(c ?? '')][0]
+  const cp = strOf(c).codePointAt(0)
+  const first = cp === undefined ? undefined : String.fromCodePoint(cp)
 
   return first === ' ' || (first && DRAWABLE.test(first)) ? first : undefined
 }
@@ -353,17 +380,17 @@ const API = {
   text: (x: unknown, y: unknown, str: unknown, color?: unknown, bg?: unknown) => {
     const col = Math.round(num(x))
     const row = Math.round(num(y))
-    ;[...String(str ?? '')].slice(0, 400).forEach((c, i) => API.put(col + i, row, charOf(c) ?? ' ', color, bg))
+    ;[...strOf(str)].slice(0, 400).forEach((c, i) => API.put(col + i, row, charOf(c) ?? ' ', color, bg))
   },
   // Multi-line art, solid inside its outline like a sprite actor.
   sprite: (x: unknown, y: unknown, art: unknown, color?: unknown, bg?: unknown) => {
     const col = Math.round(num(x))
     const row = Math.round(num(y))
-    String(art ?? '').split('\n').slice(0, 40).forEach((line, dy) => {
+    strOf(art).split('\n').slice(0, 40).forEach((line, dy) => {
       const chars = [...line.slice(0, 300)]
       const start = chars.findIndex(c => c !== ' ')
       if (start < 0) return
-      const end = line.trimEnd().length
+      const end = Math.min(chars.length, line.trimEnd().length)
       for (let dx = start; dx < end; dx++) {
         const c = charOf(chars[dx]) ?? ' '
         if (c === ' ' && bg === undefined) canvas?.clear(col + dx, row + dy)
@@ -422,14 +449,14 @@ const API = {
     const col = Math.round(num(x))
     const row = Math.round(num(py))
     const map = typeof palette === 'object' && palette !== null ? (palette as Record<string, unknown>) : {}
-    String(art ?? '').split('\n').slice(0, 80).forEach((line, dy) => {
+    strOf(art).split('\n').slice(0, 80).forEach((line, dy) => {
       ;[...line.slice(0, 300)].forEach((c, dx) => {
         if (c === ' ' || c === '.') return
         canvas?.pixel(col + dx, row + dy, colorOf(map[c]))
       })
     })
   },
-  // The 3D world: a camera (eye, target, vertical field of view in degrees),
+  // The 3D world: a camera (eye, target, the angle it sees across in degrees),
   // one light (the direction toward it, and ambient 0 to 1), and fog that
   // fades things out between two depths. Each keeps until set again.
   camera: (ex: unknown, ey: unknown, ez: unknown, tx?: unknown, ty?: unknown, tz?: unknown, fov?: unknown) => {
@@ -441,11 +468,11 @@ const API = {
   fog: (near: unknown, far: unknown, color?: unknown) => {
     if (canvas) canvas.code.fog = { near: num(near, 8), far: Math.max(num(near, 8) + 0.01, num(far, 40)), color: colorOf(color, [0, 0, 0]) }
   },
-  box: (w: unknown, h: unknown, d: unknown) => meshOut(box(num(w, 1), num(h, 1), num(d, 1))),
-  sphere: (r: unknown, segments?: unknown) => meshOut(sphere(num(r, 1), num(segments, 8))),
-  cylinder: (r: unknown, h: unknown, segments?: unknown) => meshOut(cylinder(num(r, 1), num(r, 1), num(h, 1), num(segments, 8))),
-  cone: (r: unknown, h: unknown, segments?: unknown) => meshOut(cylinder(num(r, 1), 0, num(h, 1), num(segments, 8))),
-  plane: (w: unknown, d: unknown) => meshOut(plane(num(w, 1), num(d, 1))),
+  box: (w: unknown, h: unknown, d: unknown) => meshOut('box', [num(w, 1), num(h, 1), num(d, 1)], (a, b, c) => box(a, b, c)),
+  sphere: (r: unknown, segments?: unknown) => meshOut('sphere', [num(r, 1), num(segments, 8)], (a, b) => sphere(a, b)),
+  cylinder: (r: unknown, h: unknown, segments?: unknown) => meshOut('cylinder', [num(r, 1), num(h, 1), num(segments, 8)], (a, b, c) => cylinder(a, a, b, c)),
+  cone: (r: unknown, h: unknown, segments?: unknown) => meshOut('cone', [num(r, 1), num(h, 1), num(segments, 8)], (a, b, c) => cylinder(a, 0, b, c)),
+  plane: (w: unknown, d: unknown) => meshOut('plane', [num(w, 1), num(d, 1)], (a, b) => plane(a, b)),
   // Draws a mesh placed by its options: x, y, z; rx, ry, rz (radians);
   // scale (one number or [sx, sy, sz]); color; wire (edges only); unlit.
   mesh3d: (mesh: unknown, options?: unknown) => {
@@ -476,40 +503,91 @@ const API = {
   // depth, and the pixels one world unit covers there; null behind the camera.
   project: (x: unknown, y: unknown, z: unknown) => {
     if (!canvas) return null
-    const { view } = canvas.scene3d()
+    const { view } = canvas.scene3d(false)
     const p = project(view, [num(x), num(y), num(z)])
 
     return p
       ? obj({ x: Math.round(p.x / SX), y: Math.round(p.y / SY), px: Math.round(p.x / SX), py: Math.round(p.y / (SY / 2)), depth: p.depth, scale: view.f / p.depth / SX })
       : null
   },
-  // Clawd standing at a world point (its feet there), facing the camera,
-  // sized by distance: `size` is its height in world units (1 by default).
-  // Takes the same options as clawd, and returns the same anchors, or null
-  // when it is behind the camera.
+  // Clawd standing at a world point (its feet there), facing the camera: a
+  // lit solid sized by distance (`size` is its height in world units, 0.9 by
+  // default), its eyes flat pixel art on its face. Takes the same options as
+  // clawd and returns the same anchors, or null when it is behind the camera.
   clawd3d: (x: unknown, y: unknown, z: unknown, options?: unknown) => {
     if (!canvas) return null
-    const { view } = canvas.scene3d()
-    const p = project(view, [num(x), num(y), num(z)])
+    const { frame, view, light, fog } = canvas.scene3d()
+    const at: [number, number, number] = [num(x), num(y), num(z)]
+    const p = project(view, at)
     if (!p) return null
     const o = (typeof options === 'object' && options !== null ? options : {}) as Record<string, unknown>
     const look = lookOf(o)
-    // Its height in pixel rows (two samples each), from its height in units,
-    // never more than most of the strip: Clawd is small in a big world.
-    const most = canvas.rows * 2 * 0.7
-    const pixelsTall = Math.min(most, (num(o.size, 0.9) * view.f) / p.depth / (SY / 2))
-    const s = Math.max(0.15, Math.min(6, pixelsTall / CLAWD_H))
+    // Pixel rows per world unit at its depth; its height is capped so it is
+    // never taller than most of the strip: Clawd is small in a big world.
+    const perUnit = view.f / p.depth / (SY / 2)
+    const size = Math.min(num(o.size, 0.9), (canvas.rows * 2 * 0.7) / perUnit)
+    // World units per sprite pixel, and strip pixels per sprite pixel.
+    const u = size / CLAWD_H
+    const s = (size * perUnit) / CLAWD_H
+    // Its feet at the point, unless that puts them below the strip: a Clawd
+    // near the camera stands on the bottom edge rather than out of view.
+    const below = p.y / (SY / 2) - canvas.rows * 2
+    if (below > 0) at[1] += below / perUnit
+    // It faces the camera.
+    const ry = Math.atan2(view.eye[0] - at[0], view.eye[2] - at[2])
+    const sin = Math.sin(ry)
+    const cos = Math.cos(ry)
+    const place = (q: { x: number; y: number; z: number }) => {
+      const w = project(view, [at[0] + (q.x * cos + q.z * sin) * u, at[1] + q.y * u, at[2] + (q.z * cos - q.x * sin) * u])
+
+      return w ? { x: w.x / SX, py: w.y / (SY / 2), depth: w.depth } : undefined
+    }
+    drawMesh(frame, view, light, fog, clawdMesh(look), { at, rot: [0, ry, 0], scale: [u, u, u] }, { color: look.color, wire: false, unlit: false, ascii: false })
+    const points = clawdPoints(look)
+    const feet = place(points.feet)
+    if (!feet) return null
+    // The eyes: whole pixels at a size that steps with distance, so they
+    // never smear with perspective, and none on a Clawd too small for them.
+    const ew = Math.max(1, Math.round(s))
+    if (s * CLAWD_H >= 3) {
+      for (const eye of points.eyes) {
+        const e = place(eye)
+        if (!e) continue
+        const wide = eye.kind === 'open' ? ew : 2 * ew
+        const col0 = Math.round(e.x - wide / 2)
+        const row0 = 2 * Math.round((e.py - ew) / 2)
+        const from = eye.kind === 'shut' ? row0 + ew : row0
+        for (let prow = from; prow < row0 + 2 * ew; prow++) for (let col = col0; col < col0 + wide; col++) canvas.pixel3d(col, prow, look.eyeColor, e.depth * 0.98)
+      }
+    }
     const w = Math.round(CLAWD_W * s)
     const h = Math.round(CLAWD_H * s)
-    const left = Math.round(p.x / SX - w / 2)
-    const top = Math.round(p.y / (SY / 2) - h)
-    const anchors = canvas.clawd(left, top, look, s, p.depth)
+    const left = Math.round(feet.x - w / 2)
+    const top = Math.round(feet.py - h)
+    canvas.mark({ x0: left - 1, y0: Math.floor(top / 2), x1: left + w, y1: Math.floor((top + h - 1) / 2) })
+    const anchor = (q: { x: number; y: number; z: number }) => {
+      const e = place(q) ?? feet
+      const py = Math.round(e.py)
 
-    return anchorsOut(anchors, left, top)
+      return obj({ x: Math.round(e.x), py, row: Math.floor(py / 2) })
+    }
+
+    return obj({
+      x: left,
+      py: top,
+      row: Math.floor(top / 2),
+      w,
+      h,
+      top: anchor(points.top),
+      left: anchor(points.left),
+      right: anchor(points.right),
+      feet: anchor(points.feet),
+      eyes: obj({ ...anchor(points.eyeSpan), w: Math.round(points.eyeSpan.w * s) }),
+    })
   },
   // A speech bubble pointing at x, y.
   say: (text: unknown, x: unknown, y: unknown, color?: unknown) => {
-    const line = cleanText(String(text ?? ''), 70)
+    const line = cleanText(strOf(text), 70)
     if (line) canvas?.say(line, Math.round(num(x)), Math.round(num(y)), colorOf(color, [217, 119, 87]))
   },
   rgb: (r: unknown, g: unknown, b: unknown) => packRgb(num(r), num(g), num(b)),
@@ -594,14 +672,45 @@ function anchorsOut(a: Anchors | undefined, left: number, top: number) {
   })
 }
 
-const meshOut = (m: Mesh) => obj({ verts: m.verts, faces: m.faces })
+// A primitive the code asked for, the same object for the same arguments:
+// code that builds sphere(1, 48) inside frame() (the natural way to write
+// it) would otherwise read and prepare a fresh mesh every frame. Its arrays
+// are frozen, so a change to one cannot leave its prepared normals stale.
+const PRIMITIVES = new Map<string, ReturnType<typeof obj>>()
+function meshOut(kind: string, args: number[], make: (...a: number[]) => Mesh) {
+  const key = `${kind}|${args.join(',')}`
+  let out = PRIMITIVES.get(key)
+  if (!out) {
+    if (PRIMITIVES.size >= 64) PRIMITIVES.clear()
+    const m = make(...args)
+    Object.freeze(m.verts)
+    Object.freeze(m.faces)
+    out = obj({ verts: m.verts, faces: m.faces })
+    meshesIn.set(out, { verts: m.verts, faces: m.faces, mesh: m })
+    PRIMITIVES.set(key, out)
+  }
+
+  return out
+}
 
 // A mesh as the code gives it: verts flat, faces flat triangles or lists of
-// indices (polygons, fanned into triangles).
+// indices (polygons, fanned into triangles). A mesh built once and drawn
+// every frame is read once, so its normals (kept per Mesh) are kept too.
+const meshesIn = new WeakMap<object, { verts: unknown; faces: unknown; mesh: Mesh }>()
 function meshIn(raw: unknown): Mesh | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined
   const o = raw as Record<string, unknown>
   if (!Array.isArray(o.verts) || !Array.isArray(o.faces)) return undefined
+  const known = meshesIn.get(raw)
+  if (known && known.verts === o.verts && known.faces === o.faces) return known.mesh
+  const mesh = readMesh(o)
+  meshesIn.set(raw, { verts: o.verts, faces: o.faces, mesh })
+
+  return mesh
+}
+
+function readMesh(o: Record<string, unknown>): Mesh {
+  if (!Array.isArray(o.verts) || !Array.isArray(o.faces)) return { verts: [], faces: [] }
   const verts = o.verts.slice(0, 60_000).map(v => num(v))
   const faces: number[] = []
   const count = Math.floor(verts.length / 3)
@@ -611,10 +720,12 @@ function meshIn(raw: unknown): Mesh | undefined {
     return i >= 0 && i < count ? i : -1
   }
   if (o.faces.every(f => Array.isArray(f))) {
+    // Polygons fan into triangles, up to the most one frame draws anyway.
     for (const poly of o.faces.slice(0, 20_000) as unknown[][]) {
-      const ids = poly.map(index)
+      if (faces.length >= 3 * MOST_TRIANGLES) break
+      const ids = poly.slice(0, 3 * MOST_TRIANGLES).map(index)
       if (ids.some(i => i < 0)) continue
-      for (let i = 1; i + 1 < ids.length; i++) faces.push(ids[0]!, ids[i]!, ids[i + 1]!)
+      for (let i = 1; i + 1 < ids.length && faces.length < 3 * MOST_TRIANGLES; i++) faces.push(ids[0]!, ids[i]!, ids[i + 1]!)
     }
   } else {
     const ids = o.faces.slice(0, 60_000).map(index)
@@ -717,7 +828,13 @@ function wrap(text: string, width: number) {
       line = next
     } else {
       if (line) lines.push(line)
-      line = word.slice(0, width)
+      // A word too long for a line is broken across lines.
+      let rest = word
+      while (rest.length > width) {
+        lines.push(rest.slice(0, width))
+        rest = rest.slice(width)
+      }
+      line = rest
     }
   }
   if (line) lines.push(line)
@@ -820,6 +937,7 @@ export function stage(frame: Stage): string {
   // Speech: a bubble in the clearest spot near its speaker.
   const sceneT = since / 1000
   const bubbles: Bubble[] = []
+  const saidNow = new Set<string>()
   for (const one of placed) {
     const { actor } = one
     if (one.alpha < 1 || !actor.say || sceneT < actor.sayAt) continue
@@ -840,12 +958,16 @@ export function stage(frame: Stage): string {
     const bottom = rows - 1
     const outline = spans(one)
     const drawn = outline.flatMap((span, dy) => (span ? [{ ...span, row: one.y + dy }] : []))
-    const speaker: Box = {
-      x0: Math.min(...drawn.map(d => d.x0)),
-      x1: Math.max(...drawn.map(d => d.x1)),
-      y0: Math.min(...drawn.map(d => d.row)),
-      y1: Math.max(...drawn.map(d => d.row)),
-    }
+    // An actor with nothing drawn (a blank narrator) speaks from its box.
+    const speaker: Box =
+      drawn.length > 0
+        ? {
+            x0: Math.min(...drawn.map(d => d.x0)),
+            x1: Math.max(...drawn.map(d => d.x1)),
+            y0: Math.min(...drawn.map(d => d.row)),
+            y1: Math.max(...drawn.map(d => d.row)),
+          }
+        : { x0: one.x, x1: one.x + Math.max(0, ...one.lines.map(l => l.length - 1)), y0: one.y, y1: one.y + one.lines.length - 1 }
     const { x, y, tail } = placeBubble({ speaker, wide, tall, cols, rows, covered, last: lastBubble.get(actor) })
     lastBubble.set(actor, { x, y })
     bubbles.push({ lines, x, y, wide, tall, base: parseHex(actor.color), tail })
@@ -919,52 +1041,39 @@ export function stage(frame: Stage): string {
     if (!isFilling && col >= 0 && col < cols && row >= 0 && row < rows) inked[row * cols + col] = 1
   }
   let lastClawd: Box | undefined
+  const mark = (box: Box) => {
+    lastClawd = box
+    for (let row = Math.max(0, box.y0); row <= Math.min(rows - 1, box.y1); row++) for (let col = Math.max(0, box.x0); col <= Math.min(cols - 1, box.x1); col++) ink(col, row)
+  }
+  // The cells speech bubbles have taken this frame.
+  const bubbled = new Uint8Array(cols * rows)
 
   // The frame's 3D samples, made when the code first draws in 3D, and drawn
   // as glyphs before any 2D drawing that follows, so that sits on top.
   let frame3d: Frame | undefined
-  const frameOf = () => (frame3d ??= createFrame(cols, rows))
+  let isDirty3d = false
+  const frameOf = () => (frame3d ??= Object.assign(createFrame(cols, rows), { tick: () => spend() }))
   const flush3d = () => {
-    if (frame3d) composite(frame3d, put)
+    if (frame3d && isDirty3d) composite(frame3d, put)
+    isDirty3d = false
+  }
+  // A frame that draws for too long (a fill the size of the world, thousands
+  // of meshes) stops the scene the way a runaway loop does.
+  const deadline = performance.now() + FRAME_MS
+  let calls = 0
+  const spend = () => {
+    if ((calls += 1) % 256 === 0 && performance.now() > deadline) throw new ScriptError(`a frame took more than ${FRAME_MS}ms to draw`)
   }
 
-  // Clawd at a column and a pixel row, its pixels scaled by `scaleTo` (any
-  // factor, for a figure in the distance) and depth tested when in 3D.
-  const paintClawd = (x: number, py: number, look: ClawdLook, scaleTo = 1, atDepth?: number, isHidden?: (px: { x: number; y: number }) => boolean) => {
-    const pixels = clawdPixels(look)
-    const s = look.scale
-    if (scaleTo === 1) {
-      for (const px of pixels) {
-        if (isHidden?.(px)) continue
-        plotPixel(x + px.x, py + px.y, px.c)
-      }
-    } else {
-      // Nearest-neighbor over the sprite's box, which reaches a pixel past
-      // each side for a claw held out.
-      const reach = s
-      const boxW = CLAWD_W * s + reach * 2
-      const grid = new Map<number, Rgb>()
-      for (const px of pixels) grid.set(px.y * boxW + px.x + reach, px.c)
-      const w = Math.max(1, Math.round(boxW * scaleTo))
-      const h = Math.max(1, Math.round(CLAWD_H * s * scaleTo))
-      for (let dy = 0; dy < h; dy++) {
-        for (let dx = 0; dx < w; dx++) {
-          const sx = Math.min(boxW - 1, Math.floor(((dx + 0.5) / w) * boxW))
-          const sy = Math.min(CLAWD_H * s - 1, Math.floor(((dy + 0.5) / h) * CLAWD_H * s))
-          const c = grid.get(sy * boxW + sx)
-          if (!c) continue
-          const col = x + dx - Math.round(reach * scaleTo)
-          const prow = py + dy
-          if (atDepth !== undefined && !claimPixel(frameOf(), col, prow, atDepth)) continue
-          plotPixel(col, prow, c)
-        }
-      }
+  // Clawd at a column and a pixel row, some of its pixels held back while it
+  // fades in.
+  const paintClawd = (x: number, py: number, look: ClawdLook, isHidden?: (px: { x: number; y: number }) => boolean) => {
+    for (const px of clawdPixels(look)) {
+      if (isHidden?.(px)) continue
+      plotPixel(x + px.x, py + px.y, px.c)
     }
-    const a = clawdAnchors(look)
-    if (scaleTo === 1) return a
-    const k = (p: { x: number; y: number }) => ({ x: Math.round(p.x * scaleTo), y: Math.round(p.y * scaleTo) })
 
-    return { w: Math.round(a.w * scaleTo), h: Math.round(a.h * scaleTo), top: k(a.top), left: k(a.left), right: k(a.right), feet: k(a.feet), eyes: { ...k(a.eyes), w: Math.round(a.eyes.w * scaleTo) } }
+    return clawdAnchors(look)
   }
 
   // The scene's code draws over the backdrop and swarms, under the actors.
@@ -979,6 +1088,7 @@ export function stage(frame: Stage): string {
       rows,
       code,
       put: (col, row, char, color, back) => {
+        spend()
         flush3d()
         put(col, row, char, color, back)
         ink(col, row)
@@ -987,23 +1097,37 @@ export function stage(frame: Stage): string {
         isFilling = on
       },
       clear: (col, row) => {
+        spend()
         flush3d()
         clear({ x0: col, y0: row, x1: col, y1: row })
       },
       pixel: (col, py, color) => {
+        spend()
         flush3d()
         plotPixel(col, py, color)
         ink(col, Math.floor(py / 2))
       },
-      clawd: (x, py, look, scaleTo, atDepth) => {
+      clawd: (x, py, look) => {
+        spend()
         flush3d()
-        const a = paintClawd(x, py, look, scaleTo, atDepth)
-        lastClawd = { x0: x - 1, y0: Math.floor(py / 2), x1: x + a.w, y1: Math.floor((py + a.h - 1) / 2) }
-        for (let row = lastClawd.y0; row <= lastClawd.y1; row++) for (let col = lastClawd.x0; col <= lastClawd.x1; col++) ink(col, row)
+        const a = paintClawd(x, py, look)
+        mark({ x0: x - 1, y0: Math.floor(py / 2), x1: x + a.w, y1: Math.floor((py + a.h - 1) / 2) })
 
         return a
       },
-      scene3d: () => {
+      pixel3d: (col, py, color, depth) => {
+        spend()
+        flush3d()
+        if (!claimPixel(frameOf(), col, py, depth)) return
+        plotPixel(col, py, color)
+        ink(col, Math.floor(py / 2))
+      },
+      mark,
+      scene3d: (isDrawing = true) => {
+        if (isDrawing) {
+          spend()
+          isDirty3d = true
+        }
         if (!scene3d) {
           scene3d = {
             frame: frameOf(),
@@ -1016,6 +1140,10 @@ export function stage(frame: Stage): string {
         return scene3d
       },
       say: (text, x, y, color) => {
+        spend()
+        // The same line twice in a frame is one bubble.
+        if (saidNow.has(text)) return
+        saidNow.add(text)
         flush3d()
         // A new line types out; one that only changed from a line already
         // typed (a live count, a timer) shows whole rather than restarting.
@@ -1032,7 +1160,20 @@ export function stage(frame: Stage): string {
         // it; otherwise the point itself.
         const near = lastClawd && x >= lastClawd.x0 - 2 && x <= lastClawd.x1 + 2 && y >= lastClawd.y0 - 1 && y <= lastClawd.y1 + 1
         const speaker: Box = near && lastClawd ? lastClawd : { x0: x, y0: y, x1: x, y1: y }
-        const placed3 = placeBubble({ speaker, wide, tall, cols, rows, covered: inked, last: code.bubblesAt.get(text) })
+        // The bubble keeps clear of what is drawn in runs (Clawd, labels,
+        // props) and of earlier bubbles, not of a scattering of rain, snow
+        // or sparks: a drawn cell counts when the cells on both sides of it,
+        // or above and below it, are drawn too.
+        const covered = new Uint8Array(cols * rows)
+        const drawn = (col: number, row: number) => col >= 0 && col < cols && row >= 0 && row < rows && inked[row * cols + col] === 1
+        for (let row = 0; row < rows; row++) {
+          for (let col = 0; col < cols; col++) {
+            const i = row * cols + col
+            if (bubbled[i] || (inked[i] && ((drawn(col - 1, row) && drawn(col + 1, row)) || (drawn(col, row - 1) && drawn(col, row + 1))))) covered[i] = 1
+          }
+        }
+        const placed3 = placeBubble({ speaker, wide, tall, cols, rows, covered, last: code.bubblesAt.get(text) })
+        bubbled.set(covered)
         if (code.bubblesAt.size >= 32) code.bubblesAt.clear()
         code.bubblesAt.set(text, { x: placed3.x, y: placed3.y })
         bubbles.push({ lines, x: placed3.x, y: placed3.y, wide, tall, base: color, tail: placed3.tail })
@@ -1041,9 +1182,9 @@ export function stage(frame: Stage): string {
     try {
       if (!code.isStarted) {
         code.isStarted = true
-        code.program.start({ ...API, ...globals }, SETUP_FUEL)
+        code.program.start({ ...API, ...globals }, SETUP_FUEL, SETUP_MS)
       }
-      code.program.call('frame', [sceneT, dt], globals, FRAME_FUEL)
+      code.program.call('frame', [sceneT, dt], globals, FRAME_FUEL, FRAME_MS)
       flush3d()
     } catch (e) {
       code.error = e instanceof Error ? e.message : String(e)
@@ -1056,7 +1197,7 @@ export function stage(frame: Stage): string {
   placed.forEach((one, i) => {
     const color = parseHex(one.actor.color)
     if (one.look) {
-      paintClawd(one.x, one.y * 2, one.look, 1, undefined, px => one.alpha < 1 && hash(px.x * 13 + px.y, Math.floor(since / 50) + i) > one.alpha)
+      paintClawd(one.x, one.y * 2, one.look, px => one.alpha < 1 && hash(px.x * 13 + px.y, Math.floor(since / 50) + i) > one.alpha)
 
       return
     }

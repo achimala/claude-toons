@@ -221,6 +221,9 @@ async function requestScene($: EngineInterface, b: Buddy): Promise<Narration> {
     return b.thread.accept(response.text)
   }
   b.pending.unshift(b.thread.abandon().replace(/^\[strip [^\]]*\]\n/, ''))
+  // A request refused as malformed would be refused again with the same
+  // history: the conversation begins again.
+  if (response.status === 400) b.thread.reset()
   // A rate limit waits as long as it asks; any other failure waits a little
   // longer each time it repeats.
   b.failures += 1
@@ -271,6 +274,9 @@ function ask($: EngineInterface, b: Buddy) {
             spend.scenes += 1
             b.sessionScenes += 1
           }
+          // The working time so far goes with the money, so the saved rate holds
+          // if the session ends mid-turn.
+          accrue(b, await $.clock.now())
           await $.store.set('stats', b.stats).catch(() => {})
         }
         if (told.script) {
@@ -420,8 +426,12 @@ export const register: Register = (on, options) => {
       b.running.set(id, { what, at: began })
       note(b, began, `-> started ${what}`)
     }
-    const ran = await next(e)
-    b.running.delete(id)
+    let ran: Awaited<ReturnType<typeof next>>
+    try {
+      ran = await next(e)
+    } finally {
+      b.running.delete(id)
+    }
     if (b.isTurn) {
       const at = await $.clock.now()
       const took = Math.round((at - began) / 1000)

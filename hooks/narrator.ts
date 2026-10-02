@@ -59,7 +59,7 @@ Drawing (x is the column, y the row, 0,0 top-left; anything off the strip is cli
 - say(text, x, y) a speech bubble pointing at x, y (Clawd's head is about x+7, y)
 - rgb(r, g, b), hsl(hue 0-360, sat 0-1, light 0-1), mix(c1, c2, k) make colors
 - clamp(v, lo, hi), lerp(a, b, k), smoothstep(a, b, v), fract(v), mod(a, b), rand(n) (a fixed random number per n), noise(x) and noise2(x, y) (smooth noise in [0,1)), and Math.random()
-3D: the strip can also be a window into a world. Surfaces are lit smoothly (diffuse plus a highlight) and drawn as solid cells in their lit color with block-glyph edges, clean and flat; a mesh given ascii: true is drawn instead as glyphs as dense as its brightness (" .,:;-=+*#%@"), the classic terminal look, good for a planet, a donut, a curved hero object, not for floors and walls. Give surfaces mid-to-light colors (dark ones vanish into the fog), and keep the camera and light steady or moving smoothly. camera(ex, ey, ez, tx, ty, tz, fov) sets the eye, what it looks at, and the angle it sees across (default eye 0,2.5,9 looking at 0,1,0, fov 90: at the origin that shows about 20 units across and 3 units tall, so the world is wide and low, like the strip; build things about 1 to 2 units tall and spread them left to right, and move the camera to fly, orbit or dolly). light(dx, dy, dz, ambient) is the direction toward the light; fog(near, far, color) fades things with distance (default 8 to 40 into black: that is the depth cue, keep it). Shapes: box(w, h, d) (centered), sphere(r, segments), cylinder(r, h, segments) and cone(r, h, segments) (standing on y 0), plane(w, d) (flat on the ground), or your own {verts: [x,y,z,...], faces: [[i,j,k,...], ...]}. mesh3d(mesh, {x, y, z, rx, ry, rz, scale, color, wire, unlit, ascii}) draws one, lit smoothly; wire draws its edges; unlit skips the lighting; ascii uses the glyph ramp. line3d(x0,y0,z0, x1,y1,z1, color) and point3d(x, y, z, color) for rails, rain, stars. clawd3d(x, y, z, options) puts Clawd standing at a world point, sized by distance (options as clawd, plus size: its height in units, 0.9 by default: about as tall as a crate, a third of the strip at the camera's target; it is never drawn taller than most of the strip), so it can walk down a road into the distance; it returns the same anchors, or null behind the camera. project(x, y, z) gives {x, y, px, py, depth, scale} for placing text, a bubble or 2D art at a world point. Everything 3D in a frame shares one depth buffer, so later draws go behind nearer ones. The camera, light and fog keep between frames. Good 3D scenes: a road or rails vanishing to a point with things passing, a planet with a moon orbiting, a city of boxes at night, a tunnel flying through, a chessboard, a spinning gear, a crane lifting a crate, an orbiting camera around one hero object. Keep it to a few dozen shapes; big flat-shaded shapes read better than detail at this size. Mix freely with 2D: a 3D set behind a 2D Clawd, or text labels placed with project().
+3D: the strip can also be a window into a world. Surfaces are lit smoothly (diffuse plus a highlight) and drawn as solid cells in their lit color with block-glyph edges, clean and flat; a mesh given ascii: true is drawn instead as glyphs as dense as its brightness (" .,:;-=+*#%@"), the classic terminal look, good for a planet, a donut, a curved hero object, not for floors and walls. Give surfaces mid-to-light colors (dark ones vanish into the fog), and keep the camera and light steady or moving smoothly. camera(ex, ey, ez, tx, ty, tz, fov) sets the eye, what it looks at, and the angle it sees across (default eye 0,2.5,9 looking at 0,1,0, fov 90: at the origin that shows about 20 units across and 3 units tall, so the world is wide and low, like the strip; build things about 1 to 2 units tall and spread them left to right, and move the camera to fly, orbit or dolly). light(dx, dy, dz, ambient) is the direction toward the light; fog(near, far, color) fades things with distance (default 8 to 40 into black: that is the depth cue, keep it). Shapes: box(w, h, d) (centered), sphere(r, segments), cylinder(r, h, segments) and cone(r, h, segments) (standing on y 0), plane(w, d) (flat on the ground), or your own {verts: [x,y,z,...], faces: [[i,j,k,...], ...]}. mesh3d(mesh, {x, y, z, rx, ry, rz, scale, color, wire, unlit, ascii}) draws one, lit smoothly; wire draws its edges; unlit skips the lighting; ascii uses the glyph ramp. line3d(x0,y0,z0, x1,y1,z1, color) and point3d(x, y, z, color) for rails, rain, stars. clawd3d(x, y, z, options) puts Clawd standing at a world point as a solid lit like any mesh, its eyes flat on its face, sized by distance (options as clawd, plus size: its height in units, 0.9 by default: about as tall as a crate, a third of the strip at the camera's target; it is never drawn taller than most of the strip, and one whose feet would fall below the strip stands on its bottom edge instead), so it can walk down a road into the distance; it returns the same anchors, or null behind the camera. project(x, y, z) gives {x, y, px, py, depth, scale} for placing text, a bubble or 2D art at a world point. Everything 3D in a frame shares one depth buffer, so later draws go behind nearer ones. The camera, light and fog keep between frames. Good 3D scenes: a road or rails vanishing to a point with things passing, a planet with a moon orbiting, a city of boxes at night, a tunnel flying through, a chessboard, a spinning gear, a crane lifting a crate, an orbiting camera around one hero object. Keep it to a few dozen shapes; big flat-shaded shapes read better than detail at this size. Mix freely with 2D: a 3D set behind a 2D Clawd, or text labels placed with project().
 Write the code compactly: no comments, no blank lines, short names, nothing decorative, and keep it under about 60 lines; every token of it is paid for. The code draws over the background effect and particles and under the actors. Keep each frame light: a few thousand steps is fine (a loop over every cell of the strip with a little math each is fine), heavy nested loops are not, and a frame that runs too long or throws stops the code for the rest of the scene. When the code draws everything, leave actors and particles empty and set the background's intensity to 0. When the code draws Clawd and its speech, do not also add a "clawd" actor. "" for no code.
 
 A code example, for the shape of it (do not copy the idea):
@@ -271,7 +271,8 @@ export function createThread(model: Model, options: { isThinking?: boolean; styl
 
   // Opens the next exchange with what happened since the last scene; new work
   // also gets the recent concepts to steer clear of and a fresh world.
-  const ask = (activity: string, random: () => number = Math.random) => {
+  const ask = (activityIn: string, random: () => number = Math.random) => {
+    let activity = activityIn
     const lines = activity.split('\n').filter(line => !line.startsWith('[strip '))
     task = lines.find(line => line.startsWith('[task] ')) ?? task
     // A scene whose code broke is not one to continue: a quiet beat after it
@@ -281,11 +282,13 @@ export function createThread(model: Model, options: { isThinking?: boolean; styl
       const dropped = messages.slice(0, messages.length - KEEP).filter(m => m.role === 'assistant').length
       messages.splice(0, messages.length - KEEP)
       collapsed = Math.max(0, collapsed - dropped)
-      // The task the developer gave may have been cut: the first kept message
-      // says it again.
-      const first = messages[0]
-      if (first && typeof first.content === 'string' && task && !first.content.includes(task)) first.content = `${task}\n${first.content}`
+      stripThinking()
     }
+    // The task the developer gave may have been cut, or the thread begun
+    // again: the first message says it again.
+    const first = messages[0]
+    if (first && typeof first.content === 'string' && task && !first.content.includes(task)) first.content = `${task}\n${first.content}`
+    else if (!first && task && !lines.includes(task)) activity = `${task}\n${activity}`
     const recent = concepts.slice(-RECENT)
     const steer = lines.length > 0 && !isBroken && lines.every(isQuiet)
       ? [`[playing: ${recent[recent.length - 1] ?? 'the first scene'}; answer continue: true to keep it, or its next beat]`]
@@ -337,20 +340,36 @@ export function createThread(model: Model, options: { isThinking?: boolean; styl
   // How many replies from the start have been collapsed to their concept.
   let collapsed = 0
 
+  // A thinking block is bound to the history it was made in: once that is
+  // edited (a cut, a collapse), replaying one is refused, so every edit
+  // drops them all. The model reads nothing from past thinking anyway.
+  const isThought = (block: Block) => block.type === 'thinking' || block.type === 'redacted_thinking'
+  const stripThinking = () => {
+    for (const m of messages) {
+      if (m.role === 'assistant' && Array.isArray(m.content) && m.content.some(isThought)) m.content = m.content.filter(block => !isThought(block))
+    }
+  }
+
   // Collapses the oldest whole replies to their concept lines, a batch at a
-  // time. A reply holding a thinking block is left whole: editing such
-  // history can be refused.
+  // time.
   const collapse = () => {
-    const replies = messages.map((m, i) => ({ m, i })).filter(({ m }) => m.role === 'assistant')
+    const replies = messages.filter(m => m.role === 'assistant')
     const whole = replies.length - collapsed
     if (whole < FULL + BATCH) return
     const batch = replies.slice(collapsed, replies.length - FULL)
-    if (batch.some(({ m }) => Array.isArray(m.content) && m.content.some(block => block.type === 'thinking' || block.type === 'redacted_thinking'))) return
-    for (const { m } of batch) {
+    for (const m of batch) {
       const concept = conceptOf(m)
       m.content = [{ type: 'text', text: JSON.stringify({ concept, note: 'an earlier scene, kept only as its concept' }) }]
     }
     collapsed += batch.length
+    stripThinking()
+  }
+
+  // Begins the conversation again, after a request the API would not take
+  // however it is retried: the next exchange says the task again.
+  const reset = () => {
+    messages.length = 0
+    collapsed = 0
   }
 
   // A reply's concept line, from its JSON.
@@ -408,5 +427,5 @@ export function createThread(model: Model, options: { isThinking?: boolean; styl
     }
   }
 
-  return { ask, request, isFallbackRefused, abandon, accept, isThinking: Boolean(options.isThinking), styles: options.styles ?? 'mix' }
+  return { ask, request, isFallbackRefused, abandon, accept, reset, isThinking: Boolean(options.isThinking), styles: options.styles ?? 'mix' }
 }

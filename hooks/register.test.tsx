@@ -98,7 +98,7 @@ test('new work gets a fresh world and the recent concepts; a quiet beat continue
     })
   thread.ask('[strip 80x9]\n[task] find bugs', () => 0.3)
   const first = JSON.parse(thread.request('bearer').body).messages[0].content as string
-  expect(first).toMatch(/\n\[world: .+\]$/)
+  expect(first).toMatch(/\n\[world: .+\]\n\[style: .+\]$/)
   expect(first).not.toContain('[recent scenes')
   thread.accept(answer('deep sea: Clawd in a bathysphere'))
   thread.ask('[strip 80x9]\n+3s -> started Read `src/a.ts`')
@@ -108,7 +108,7 @@ test('new work gets a fresh world and the recent concepts; a quiet beat continue
   expect(thread.abandon()).toBe('[strip 80x9]\n+3s -> started Read `src/a.ts`')
   thread.ask('[strip 80x9]\n+20s still running Bash `npm test` (12s so far)')
   const quiet = JSON.parse(thread.request('bearer').body).messages[2].content as string
-  expect(quiet).toContain('[continue: deep sea: Clawd in a bathysphere]')
+  expect(quiet).toContain('[playing: deep sea: Clawd in a bathysphere; answer continue: true')
   expect(quiet).not.toContain('[world:')
 })
 

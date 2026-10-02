@@ -46,9 +46,9 @@ function lex(src: string): Tok[] {
       const end = src.indexOf('*/', i + 2)
       i = end < 0 ? src.length : end + 2
     } else if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(src[i + 1] ?? ''))) {
-      const m = /^(0x[0-9a-f]+|0b[01]+|(\d+\.?\d*|\.\d+)(e[+-]?\d+)?)/i.exec(src.slice(i))
+      const m = /^(0x[0-9a-f_]+|0b[01_]+|(\d[\d_]*\.?[\d_]*|\.\d[\d_]*)(e[+-]?\d+)?)/i.exec(src.slice(i))
       const text = m?.[0] ?? c
-      toks.push({ k: 'num', v: Number(text), at: i })
+      toks.push({ k: 'num', v: Number(text.replace(/_/g, '')), at: i })
       i += text.length
     } else if (/[A-Za-z_$]/.test(c)) {
       const m = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(src.slice(i))
@@ -61,12 +61,13 @@ function lex(src: string): Tok[] {
       i++
       while (i < src.length && src[i] !== c) {
         if (src[i] === '\\') {
-          i++
-          v += unescape(src[i] ?? '')
+          const [ch, next] = escapeAt(src, i + 1)
+          v += ch
+          i = next
         } else {
           v += src[i]
+          i++
         }
-        i++
       }
       if (i >= src.length) fail('unclosed string')
       i++
@@ -79,20 +80,14 @@ function lex(src: string): Tok[] {
       i++
       while (i < src.length && src[i] !== '`') {
         if (src[i] === '\\') {
-          i++
-          v += unescape(src[i] ?? '')
-          i++
+          const [ch, next] = escapeAt(src, i + 1)
+          v += ch
+          i = next
         } else if (src.startsWith('${', i)) {
           strs.push(v)
           v = ''
-          i += 2
-          let depth = 1
-          const start = i
-          while (i < src.length && depth > 0) {
-            if (src[i] === '{') depth++
-            else if (src[i] === '}') depth--
-            if (depth > 0) i++
-          }
+          const start = i + 2
+          i = closeOf(src, start)
           exprs.push(src.slice(start, i))
           i++
         } else {
@@ -105,7 +100,8 @@ function lex(src: string): Tok[] {
       strs.push(v)
       toks.push({ k: 'tpl', strs, exprs, at })
     } else {
-      const op = OPS.find(o => src.startsWith(o, i)) ?? (SINGLE.includes(c) ? c : undefined)
+      // "?." before a digit is a ternary and a number: t > 0 ? .5 : 1
+      const op = OPS.find(o => src.startsWith(o, i) && !(o === '?.' && /\d/.test(src[i + 2] ?? ''))) ?? (SINGLE.includes(c) ? c : undefined)
       if (!op) fail(`unexpected "${c}"`)
       toks.push({ k: 'op', v: op as string, at: i })
       i += (op as string).length
@@ -116,7 +112,53 @@ function lex(src: string): Tok[] {
   return toks
 }
 
-const unescape = (c: string) => ({ n: '\n', t: '\t', r: '', '0': '\0' })[c] ?? c
+const SIMPLE_ESCAPES: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', '0': '\0' }
+
+// The character an escape at i (just after its backslash) stands for, and
+// where the escape ends.
+function escapeAt(src: string, i: number): [string, number] {
+  const c = src[i] ?? ''
+  const simple = SIMPLE_ESCAPES[c]
+  if (simple !== undefined) return [simple, i + 1]
+  if (c === 'x' || c === 'u') {
+    const m = (c === 'x' ? /^[0-9a-f]{2}/i : /^([0-9a-f]{4}|\{[0-9a-f]{1,6}\})/i).exec(src.slice(i + 1, i + 9))
+    const code = m ? parseInt(m[0].replace(/[{}]/g, ''), 16) : NaN
+    if (m && code <= 0x10ffff) return [String.fromCodePoint(code), i + 1 + m[0].length]
+  }
+
+  return [c, i + 1]
+}
+
+// From just after a template's "${", the index of the "}" that closes it,
+// stepping over strings and nested templates so their braces do not count.
+function closeOf(src: string, i: number): number {
+  let depth = 1
+  while (i < src.length) {
+    const c = src[i]
+    if (c === '"' || c === "'" || c === '`') {
+      i = skipString(src, i)
+      continue
+    }
+    if (c === '{') depth++
+    else if (c === '}' && --depth === 0) return i
+    i++
+  }
+
+  return i
+}
+
+// The index just past the string literal that opens at i.
+function skipString(src: string, i: number): number {
+  const q = src[i]
+  i++
+  while (i < src.length && src[i] !== q) {
+    if (src[i] === '\\') i += 2
+    else if (q === '`' && src.startsWith('${', i)) i = closeOf(src, i + 2) + 1
+    else i++
+  }
+
+  return i + 1
+}
 
 // ---------------------------------------------------------------- syntax
 
@@ -184,7 +226,7 @@ function parse(src: string): Node[] {
       const items: (Node | null)[] = []
       while (!is(']')) {
         if (is(',')) items.push(null)
-        else items.push(pattern())
+        else items.push(restOr(pattern))
         if (!is(']')) eat(',')
       }
       eat(']')
@@ -192,8 +234,12 @@ function parse(src: string): Node[] {
     } else if (maybe('{')) {
       const props: [string, Node][] = []
       while (!is('}')) {
-        const key = name()
-        props.push([key, maybe(':') ? pattern() : withDefault({ t: 'id', name: key })])
+        if (maybe('...')) {
+          props.push(['...', { t: 'rest', target: pattern() }])
+        } else {
+          const key = name()
+          props.push([key, maybe(':') ? pattern() : withDefault({ t: 'id', name: key })])
+        }
         if (!is('}')) eat(',')
       }
       eat('}')
@@ -206,6 +252,33 @@ function parse(src: string): Node[] {
   }
   function withDefault(target: Node): Node {
     return maybe('=') ? { t: 'default', target, def: assign() } : target
+  }
+  // A "...rest" item in a list pattern, or an ordinary one.
+  function restOr(item: () => Node): Node {
+    return maybe('...') ? { t: 'rest', target: pattern() } : item()
+  }
+
+  // An array or object literal on the left of "=" is a pattern: [a, b] = [b, a].
+  function toPattern(e: Node): Node {
+    switch (e.t) {
+      case 'id':
+      case 'member':
+        return e
+      case 'spread':
+        return { t: 'rest', target: toPattern(e.e) }
+      case 'assign':
+        if (e.op === '=') return { t: 'default', target: toPattern(e.target), def: e.value }
+        break
+      case 'arr':
+        return { t: 'arrPat', items: (e.items as Node[]).map(toPattern) }
+      case 'obj':
+        return {
+          t: 'objPat',
+          props: (e.props as [Node | string, Node][]).map(([k, v]) => (typeof k === 'string' ? [k, k === '...' ? { t: 'rest', target: toPattern(v) } : toPattern(v)] : fail('cannot assign to that'))),
+        }
+    }
+
+    return fail('cannot assign to that')
   }
 
   function declaration(): Node {
@@ -223,7 +296,7 @@ function parse(src: string): Node[] {
     eat('(')
     const list: Node[] = []
     while (!is(')')) {
-      list.push(pattern())
+      list.push(restOr(pattern))
       if (!is(')')) eat(',')
     }
     eat(')')
@@ -379,17 +452,18 @@ function parse(src: string): Node[] {
     if (isArrow()) {
       const list = peek().k === 'id' ? [{ t: 'id', name: name() }] : params()
       eat('=>')
-      if (is('{')) return { t: 'fn', params: list, body: block() }
+      if (is('{')) return { t: 'fn', arrow: true, params: list, body: block() }
 
-      return { t: 'fn', params: list, body: [{ t: 'return', value: assign() }] }
+      return { t: 'fn', arrow: true, params: list, body: [{ t: 'return', value: assign() }] }
     }
     const left = conditional()
     const tok = peek()
     if (tok.k === 'op' && ASSIGN.has(tok.v)) {
-      if (!['id', 'member'].includes(left.t)) fail('cannot assign to that')
+      const target = tok.v === '=' && (left.t === 'arr' || left.t === 'obj') ? toPattern(left) : left
+      if (!['id', 'member', 'arrPat', 'objPat'].includes(target.t)) fail('cannot assign to that')
       p++
 
-      return { t: 'assign', op: tok.v, target: left, value: assign() }
+      return { t: 'assign', op: tok.v, target, value: assign() }
     }
 
     return left
@@ -466,20 +540,27 @@ function parse(src: string): Node[] {
     } else {
       e = primary()
     }
+    // Past a "?.", the whole rest of the chain is optional: o?.a.b() is
+    // undefined when o is, as in JavaScript.
+    let optional = false
     for (;;) {
-      if (maybe('.')) e = { t: 'member', obj: e, prop: { t: 'lit', v: name() } }
-      else if (maybe('?.')) {
-        if (is('(')) e = { t: 'call', callee: e, args: args(), optional: true }
-        else if (maybe('[')) {
-          const prop = expression()
-          eat(']')
-          e = { t: 'member', obj: e, prop, optional: true }
-        } else e = { t: 'member', obj: e, prop: { t: 'lit', v: name() }, optional: true }
-      } else if (maybe('[')) {
+      if (maybe('?.')) {
+        optional = true
+        if (is('(')) {
+          e = { t: 'call', callee: e, args: args(), optional }
+          continue
+        }
+        if (!is('[')) {
+          e = { t: 'member', obj: e, prop: { t: 'lit', v: name() }, optional }
+          continue
+        }
+      }
+      if (maybe('.')) e = { t: 'member', obj: e, prop: { t: 'lit', v: name() }, optional }
+      else if (maybe('[')) {
         const prop = expression()
         eat(']')
-        e = { t: 'member', obj: e, prop }
-      } else if (is('(')) e = { t: 'call', callee: e, args: args() }
+        e = { t: 'member', obj: e, prop, optional }
+      } else if (is('(')) e = { t: 'call', callee: e, args: args(), optional }
       else return e
     }
   }
@@ -498,7 +579,9 @@ function parse(src: string): Node[] {
       if (tok.v === 'function') {
         const fnName = peek().k === 'id' ? name() : undefined
 
-        return { t: 'fn', name: fnName, params: params(), body: block() }
+        // A function expression's name is its own to use inside; a
+        // declaration's is the enclosing scope's.
+        return { t: 'fn', name: fnName, self: fnName !== undefined, params: params(), body: block() }
       }
 
       return { t: 'id', name: tok.v }
@@ -565,9 +648,26 @@ function parse(src: string): Node[] {
 // The fuel left for the current run; every statement, loop turn and call
 // spends one.
 let fuel = 0
+// When the run must be over by the clock: what a host method does on one
+// unit of fuel (copying a huge object, reading a long string as a number)
+// is caught here when fuel alone would not catch it.
+let deadline = Infinity
+const late = () => {
+  if (performance.now() > deadline) throw new ScriptError('the scene code took too long to run')
+}
 const burn = () => {
   if (--fuel < 0) throw new ScriptError('the scene code took too long to run')
+  if ((fuel & 255) === 0) late()
 }
+// Work over n elements inside one host method spends fuel too, so a loop of
+// slices over a huge array cannot run for seconds on one unit each.
+const cost = (n: number) => {
+  fuel -= Math.max(0, Math.min(n, 2 ** 31 - 1)) >> 5
+  if (fuel < 0) throw new ScriptError('the scene code took too long to run')
+  if (n >= 1024) late()
+}
+// The keys of an object about to be copied or walked, paid for.
+const keysOf = (v: Record<string, V>) => sized(Object.keys(v))
 
 // The largest array the code may build, and the longest string.
 const MAX_LENGTH = 100_000
@@ -575,7 +675,8 @@ const MAX_LENGTH = 100_000
 class Scope {
   vars = new Map<string, V>()
   consts?: Set<string>
-  constructor(readonly parent?: Scope) {}
+  // A function's own scope, where its var declarations land.
+  constructor(readonly parent?: Scope, readonly isFunction = false) {}
   declare(name: string, value: V, isConst = false) {
     this.vars.set(name, value)
     if (isConst) (this.consts ??= new Set()).add(name)
@@ -605,6 +706,9 @@ class Fn {
     readonly body: Exec,
     readonly scope: Scope,
     readonly name?: string,
+    readonly self = false,
+    // An arrow function keeps the `this` of where it was written.
+    readonly isArrow = false,
   ) {}
 }
 
@@ -616,11 +720,36 @@ export const obj = (entries: Record<string, V> = {}) => Object.assign(Object.cre
 const isObj = (v: V): v is Record<string, V> => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.getPrototypeOf(v) === null
 const describe = (v: V) => (v === null ? 'null' : v === undefined ? 'undefined' : typeof v === 'string' ? `"${v.slice(0, 20)}"` : Array.isArray(v) ? 'an array' : typeof v)
 
-export function call(f: V, args: V[]): V {
+// What a value reads as in a string: objects have no prototype here, so the
+// host's String would throw on them.
+const str = (v: V, depth = 0): string => {
+  if (Array.isArray(v)) return depth > 8 ? '' : joinAll(v, ',', depth + 1)
+  if (isObj(v)) return '[object Object]'
+  if (v instanceof Fn || typeof v === 'function') return `function ${v.name ?? ''}() {}`
+
+  return String(v)
+}
+const joinAll = (a: V[], sep: string, depth = 0): string => {
+  cost(a.length)
+  let out = ''
+  for (let i = 0; i < a.length; i++) {
+    if (i > 0) out += sep
+    const v = a[i]
+    if (v !== null && v !== undefined) out += str(v, depth)
+    checkLength(out.length)
+  }
+
+  return out
+}
+
+// `self` is what `this` means inside: the holder of a method call.
+export function call(f: V, args: V[], self?: V): V {
   burn()
   if (f instanceof Fn) {
-    const scope = new Scope(f.scope)
-    f.params.forEach((param, i) => bind(param, args[i], scope, 'let'))
+    const scope = new Scope(f.scope, true)
+    if (f.self) scope.declare(f.name as string, f)
+    if (!f.isArrow) scope.declare('this', self)
+    bindList(f.params, args, scope, 'let')
     scope.declare('arguments', args)
     const signal = f.body(scope)
 
@@ -636,25 +765,29 @@ const checkLength = (n: number) => {
   return n
 }
 
+// The length of the array a method over a would build or walk.
+const sized = (a: V[]) => (cost(a.length), a)
+
 const ARRAY: Record<string, (a: V[], ...args: V[]) => V> = {
   push: (a, ...v) => (checkLength(a.length + v.length), a.push(...v)),
   pop: a => a.pop(),
-  shift: a => a.shift(),
-  unshift: (a, ...v) => (checkLength(a.length + v.length), a.unshift(...v)),
-  slice: (a, s, e) => a.slice(s, e),
-  splice: (a, s, n, ...v) => a.splice(s, n ?? a.length, ...v),
+  shift: a => sized(a).shift(),
+  unshift: (a, ...v) => (checkLength(a.length + v.length), sized(a).unshift(...v)),
+  slice: (a, s, e) => sized(a).slice(s, e),
+  splice: (a, s, n, ...v) => (s === undefined ? [] : (checkLength(a.length + v.length), sized(a).splice(s, n === undefined ? a.length : n, ...v))),
   concat: (a, ...v) => {
-    const out = a.concat(...v)
-    checkLength(out.length)
+    let n = a.length
+    for (const x of v) n += Array.isArray(x) ? x.length : 1
+    cost(checkLength(n))
 
-    return out
+    return a.concat(...v)
   },
-  indexOf: (a, v) => a.indexOf(v),
-  lastIndexOf: (a, v) => a.lastIndexOf(v),
-  includes: (a, v) => a.includes(v),
-  join: (a, sep) => a.join(sep ?? ','),
-  reverse: a => a.reverse(),
-  fill: (a, v, s, e) => a.fill(v, s, e),
+  indexOf: (a, v, from) => sized(a).indexOf(v, from),
+  lastIndexOf: (a, v, from) => (from === undefined ? sized(a).lastIndexOf(v) : sized(a).lastIndexOf(v, from)),
+  includes: (a, v, from) => sized(a).includes(v, from),
+  join: (a, sep) => joinAll(a, sep === undefined ? ',' : str(sep)),
+  reverse: a => sized(a).reverse(),
+  fill: (a, v, s, e) => sized(a).fill(v, s, e),
   at: (a, i) => a.at(i),
   map: (a, f) => a.map((v, i) => call(f, [v, i, a])),
   filter: (a, f) => a.filter((v, i) => call(f, [v, i, a])),
@@ -665,51 +798,88 @@ const ARRAY: Record<string, (a: V[], ...args: V[]) => V> = {
   findIndex: (a, f) => a.findIndex((v, i) => call(f, [v, i, a])),
   reduce: (a, f, ...init) =>
     init.length > 0 ? a.reduce((acc, v, i) => call(f, [acc, v, i, a]), init[0]) : a.reduce((acc, v, i) => call(f, [acc, v, i, a])),
-  sort: (a, f) => a.sort(f === undefined ? undefined : (x, y) => Number(call(f, [x, y])) || 0),
-  flat: a => a.flat(),
+  sort: (a, f) => {
+    cost(a.length * Math.ceil(Math.log2(a.length + 1)))
+
+    const byString = (x: V, y: V) => {
+      const sx = str(x)
+      const sy = str(y)
+
+      return sx < sy ? -1 : sx > sy ? 1 : 0
+    }
+
+    return a.sort(f === undefined ? byString : (x, y) => Number(call(f, [x, y])) || 0)
+  },
+  flat: a => {
+    let n = 0
+    for (const x of a) n += Array.isArray(x) ? x.length : 1
+    cost(checkLength(n))
+
+    return a.flat()
+  },
 }
 
+const text = (s: string) => (cost(s.length), s)
+const padTo = (n: V) => (cost(checkLength(Number(n) || 0)), n)
+
 const STRING: Record<string, (s: string, ...args: V[]) => V> = {
-  slice: (s, a, b) => s.slice(a, b),
-  substring: (s, a, b) => s.substring(a, b),
+  slice: (s, a, b) => text(s).slice(a, b),
+  substring: (s, a, b) => text(s).substring(a, b),
   charAt: (s, i) => s.charAt(i),
   charCodeAt: (s, i) => s.charCodeAt(i),
   codePointAt: (s, i) => s.codePointAt(i),
-  indexOf: (s, v) => s.indexOf(String(v)),
-  includes: (s, v) => s.includes(String(v)),
-  startsWith: (s, v) => s.startsWith(String(v)),
-  endsWith: (s, v) => s.endsWith(String(v)),
-  split: (s, sep) => s.split(sep === undefined ? (undefined as unknown as string) : String(sep)),
-  repeat: (s, n) => s.repeat(checkLength(s.length * Math.max(0, Math.floor(Number(n) || 0))) > 0 ? Math.floor(n) : 0),
-  padStart: (s, n, f) => s.padStart(checkLength(n), f),
-  padEnd: (s, n, f) => s.padEnd(checkLength(n), f),
-  toUpperCase: s => s.toUpperCase(),
-  toLowerCase: s => s.toLowerCase(),
-  trim: s => s.trim(),
-  replace: (s, a, b) => s.replace(String(a), String(b)),
-  replaceAll: (s, a, b) => s.split(String(a)).join(String(b)),
+  indexOf: (s, v, from) => text(s).indexOf(str(v), from),
+  lastIndexOf: (s, v, from) => text(s).lastIndexOf(str(v), from),
+  includes: (s, v, from) => text(s).includes(str(v), from),
+  startsWith: (s, v, from) => s.startsWith(str(v), from),
+  endsWith: (s, v, end) => s.endsWith(str(v), end),
+  split: (s, sep, limit) => text(s).split(sep === undefined ? (undefined as unknown as string) : str(sep), limit),
+  repeat: (s, n) => {
+    const times = Math.max(0, Math.floor(Number(n) || 0))
+    cost(checkLength(s.length * times))
+
+    return s.repeat(times)
+  },
+  padStart: (s, n, f) => s.padStart(padTo(n), f === undefined ? undefined : str(f)),
+  padEnd: (s, n, f) => s.padEnd(padTo(n), f === undefined ? undefined : str(f)),
+  toUpperCase: s => text(s).toUpperCase(),
+  toLowerCase: s => text(s).toLowerCase(),
+  trim: s => text(s).trim(),
+  replace: (s, a, b) => {
+    const out = text(s).replace(str(a), str(b))
+    checkLength(out.length)
+
+    return out
+  },
+  replaceAll: (s, a, b) => {
+    const parts = text(s).split(str(a))
+    const glue = str(b)
+    checkLength(s.length + (parts.length - 1) * glue.length)
+
+    return parts.join(glue)
+  },
   at: (s, i) => s.at(i),
 }
 
 const own = <T>(table: Record<string, T>, key: V): T | undefined =>
-  Object.prototype.hasOwnProperty.call(table, String(key)) ? table[String(key)] : undefined
+  Object.prototype.hasOwnProperty.call(table, str(key)) ? table[str(key)] : undefined
 
 // Names hung on a library function, as Array.from hangs on Array.
 const STATICS = new WeakMap<object, Record<string, V>>()
 
 function get(target: V, key: V): V {
-  if (target === null || target === undefined) throw new ScriptError(`cannot read "${String(key)}" of ${target}`)
+  if (target === null || target === undefined) throw new ScriptError(`cannot read "${str(key)}" of ${target}`)
   if (Array.isArray(target)) {
     if (typeof key === 'number') return target[key]
     if (key === 'length') return target.length
     const m = own(ARRAY, key)
     if (m) return (...a: V[]) => m(target, ...a)
-    if (/^\d+$/.test(String(key))) return target[Number(key)]
+    if (/^\d+$/.test(str(key))) return target[Number(key)]
 
     return undefined
   }
   if (typeof target === 'string') {
-    if (typeof key === 'number' || /^\d+$/.test(String(key))) return target[Number(key)]
+    if (typeof key === 'number' || /^\d+$/.test(str(key))) return target[Number(key)]
     if (key === 'length') return target.length
     const m = own(STRING, key)
 
@@ -738,24 +908,50 @@ function set(target: V, key: V, value: V): V {
       return value
     }
     const i = Number(key)
-    if (!Number.isInteger(i) || i < 0) throw new ScriptError(`bad array index ${String(key)}`)
+    if (!Number.isInteger(i) || i < 0) throw new ScriptError(`bad array index ${str(key)}`)
     checkLength(i + 1)
     target[i] = value
 
     return value
   }
   if (isObj(target)) {
-    target[String(key)] = value
+    if (Object.isFrozen(target)) throw new ScriptError(`cannot set "${str(key)}": built-in objects are read-only`)
+    target[str(key)] = value
 
     return value
   }
-  throw new ScriptError(`cannot set "${String(key)}" on ${describe(target)}`)
+  throw new ScriptError(`cannot set "${str(key)}" on ${describe(target)}`)
+}
+
+// An operand read as a number or compared loosely: a long string costs its
+// length to scan, and a plain object (which has no toString here) or an array
+// reads as the string it would in JavaScript, instead of throwing.
+const operand = (v: V): V => {
+  if (typeof v === 'string') {
+    cost(v.length)
+
+    return v
+  }
+
+  return isObj(v) || Array.isArray(v) ? str(v) : v
 }
 
 function binop(op: string, a: V, b: V): V {
+  if (op === 'in') return isObj(b) ? Object.prototype.hasOwnProperty.call(b, str(a)) : Array.isArray(b) ? Number(a) in b : false
+  if (op === '==' || op === '!=') {
+    // Two objects are the same only when they are one object.
+    const same = isPrimitive(a) || isPrimitive(b) ? operand(a) == operand(b) : a === b // eslint-disable-line eqeqeq
+
+    return op === '==' ? same : !same
+  }
+  if (op !== '+' && op !== '===' && op !== '!==') {
+    a = operand(a)
+    b = operand(b)
+  }
   switch (op) {
     case '+': {
-      const v = a + b
+      if (typeof a === 'number' && typeof b === 'number') return a + b
+      const v = isPrimitive(a) && isPrimitive(b) ? a + b : str(a) + str(b)
       if (typeof v === 'string') checkLength(v.length)
 
       return v
@@ -765,8 +961,6 @@ function binop(op: string, a: V, b: V): V {
     case '/': return a / b
     case '%': return a % b
     case '**': return a ** b
-    case '==': return a == b // eslint-disable-line eqeqeq
-    case '!=': return a != b // eslint-disable-line eqeqeq
     case '===': return a === b
     case '!==': return a !== b
     case '<': return a < b
@@ -779,16 +973,26 @@ function binop(op: string, a: V, b: V): V {
     case '<<': return a << b
     case '>>': return a >> b
     case '>>>': return a >>> b
-    case 'in': return isObj(b) ? Object.prototype.hasOwnProperty.call(b, String(a)) : Array.isArray(b) ? Number(a) in b : false
   }
   throw new ScriptError(`unknown operator ${op}`)
 }
 
-// Binds a pattern (a name, [a, b], {x, y}, with defaults) to a value.
+const isPrimitive = (v: V) => v === null || (typeof v !== 'object' && typeof v !== 'function')
+
+// Binds a pattern (a name, [a, b], {x, y}, with defaults and ...rest) to a
+// value: kind is let, const or var to declare, or "assign" to assign.
 function bind(pattern: Node, value: V, scope: Scope, kind: string) {
   switch (pattern.t) {
-    case 'id':
-      scope.declare(pattern.name, value, kind === 'const')
+    case 'id': {
+      if (kind === 'assign') return scope.assign(pattern.name, value)
+      let target = scope
+      if (kind === 'var') while (!target.isFunction && target.parent) target = target.parent
+      target.declare(pattern.name, value, kind === 'const')
+
+      return
+    }
+    case 'member':
+      set(evalNode(pattern.obj)(scope), evalNode(pattern.prop)(scope), value)
 
       return
     case 'default':
@@ -796,14 +1000,96 @@ function bind(pattern: Node, value: V, scope: Scope, kind: string) {
 
       return
     case 'arrPat':
-      ;(pattern.items as (Node | null)[]).forEach((item, i) => item && bind(item, get(value, i), scope, kind))
+      bindList(pattern.items, value, scope, kind)
 
       return
-    case 'objPat':
-      for (const [key, target] of pattern.props as [string, Node][]) bind(target, get(value, key), scope, kind)
+    case 'objPat': {
+      const taken = new Set<string>()
+      for (const [key, target] of pattern.props as [string, Node][]) {
+        if (key !== '...') {
+          taken.add(key)
+          bind(target, get(value, key), scope, kind)
+          continue
+        }
+        const rest = obj()
+        if (isObj(value)) for (const k of keysOf(value)) if (!taken.has(k)) rest[k] = value[k]
+        bind(target.target, rest, scope, kind)
+      }
 
       return
+    }
   }
+  throw new ScriptError('cannot assign to that')
+}
+
+// Binds the items of a list pattern (or parameters) to a value's elements.
+function bindList(items: (Node | null)[], value: V, scope: Scope, kind: string) {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    if (!item) continue
+    if (item.t === 'rest') {
+      const list = Array.isArray(value) ? value : toList(value)
+      cost(list.length)
+      bind(item.target, list.slice(i), scope, kind)
+
+      return
+    }
+    bind(item, get(value, i), scope, kind)
+  }
+}
+
+// Calls visit on node and everything under it, stopping at functions unless
+// told to go in.
+function walk(node: V, visit: (n: Node) => void, intoFns: boolean) {
+  if (Array.isArray(node)) {
+    for (const n of node) walk(n, visit, intoFns)
+
+    return
+  }
+  if (node === null || typeof node !== 'object') return
+  if (typeof node.t === 'string') {
+    visit(node)
+    if (node.t === 'fn' && !intoFns) return
+  }
+  for (const k in node) if (k !== 't') walk(node[k], visit, intoFns)
+}
+
+// The names a pattern binds.
+function patternNames(p: Node, out: string[]) {
+  switch (p.t) {
+    case 'id':
+      out.push(p.name)
+      break
+    case 'default':
+    case 'rest':
+      patternNames(p.target, out)
+      break
+    case 'arrPat':
+      for (const item of p.items as (Node | null)[]) if (item) patternNames(item, out)
+      break
+    case 'objPat':
+      for (const [, target] of p.props as [string, Node][]) patternNames(target, out)
+  }
+}
+
+// The var names declared anywhere in a function body, which exist throughout it.
+function varNames(body: Node[]): string[] {
+  const out: string[] = []
+  walk(body, n => {
+    if (n.t === 'decl' && n.kind === 'var') for (const [target] of n.decls as [Node, Node | undefined][]) patternNames(target, out)
+    if ((n.t === 'forOf' || n.t === 'forIn') && n.kind === 'var') patternNames(n.target, out)
+  }, false)
+
+  return out
+}
+
+const hasFn = (node: V): boolean => {
+  let found = false
+  walk(node, n => {
+    if (n.t === 'fn') found = true
+  }, true)
+
+  return found
 }
 
 // Compiled closures, cached per node so a function body compiles once.
@@ -841,7 +1127,8 @@ function compileExpr(node: Node): Eval {
       return s => {
         let out = strs[0] ?? ''
         exprs.forEach((e, i) => {
-          out += String(e(s)) + (strs[i + 1] ?? '')
+          out += str(e(s)) + (strs[i + 1] ?? '')
+          checkLength(out.length)
         })
 
         return out
@@ -873,7 +1160,10 @@ function compileExpr(node: Node): Eval {
         for (const { key, value } of props) {
           if (key === '...') {
             const v = value(s)
-            if (isObj(v)) Object.assign(out, v)
+            if (isObj(v)) {
+              keysOf(v)
+              Object.assign(out, v)
+            }
           }
           else out[typeof key === 'string' ? key : String(key(s))] = value(s)
         }
@@ -883,10 +1173,11 @@ function compileExpr(node: Node): Eval {
     }
     case 'fn': {
       const params = node.params as Node[]
-      const body = compileBody(node.body as Node[])
+      const body = compileBody(node.body as Node[], true)
       const name = node.name as string | undefined
+      const self = node.self === true
 
-      return s => new Fn(params, body, s, name)
+      return s => new Fn(params, body, s, name, self, node.arrow === true)
     }
     case 'seq': {
       const a = evalNode(node.a)
@@ -897,20 +1188,24 @@ function compileExpr(node: Node): Eval {
     case 'unary': {
       const arg = evalNode(node.arg)
       switch (node.op) {
-        case '-': return s => -arg(s)
-        case '+': return s => +arg(s)
+        case '-': return s => -operand(arg(s))
+        case '+': return s => +operand(arg(s))
         case '!': return s => !arg(s)
-        default: return s => ~arg(s)
+        default: return s => ~operand(arg(s))
       }
     }
     case 'typeof': {
       const arg = evalNode(node.arg)
+      // typeof of a name never declared is "undefined"; any other error stands.
+      const isName = (node.arg as Node).t === 'id'
 
       return s => {
         let v: V
         try {
           v = arg(s)
-        } catch {
+        } catch (e) {
+          if (!isName) throw e
+
           return 'undefined'
         }
 
@@ -964,9 +1259,33 @@ function compileExpr(node: Node): Eval {
 
         return out
       }
-      const f = evalNode(callee)
       const label = callee.t === 'id' ? callee.name : callee.t === 'member' && callee.prop.t === 'lit' ? callee.prop.v : 'that'
       const optional = node.optional as boolean | undefined
+      if (callee.t === 'member') {
+        const o = evalNode(callee.obj)
+        const k = evalNode(callee.prop)
+        const skipNull = callee.optional === true
+
+        return s => {
+          const holder = o(s)
+          if (skipNull && (holder === null || holder === undefined)) return undefined
+          const key = k(s)
+          // Array and string methods run straight from their tables, with no
+          // bound closure made for the call.
+          const m = Array.isArray(holder) ? own(ARRAY, key) : typeof holder === 'string' ? own(STRING, key) : undefined
+          if (m) {
+            burn()
+
+            return m(holder, ...argsOf(s))
+          }
+          const fn = get(holder, key)
+          if (optional && (fn === null || fn === undefined)) return undefined
+          if (!(fn instanceof Fn) && typeof fn !== 'function') throw new ScriptError(`${label} is not a function`)
+
+          return call(fn, argsOf(s), holder)
+        }
+      }
+      const f = evalNode(callee)
 
       return s => {
         const fn = f(s)
@@ -994,6 +1313,14 @@ function compileExpr(node: Node): Eval {
         return s => {
           const v = combine(() => s.lookup(id), s)
           s.assign(id, v)
+
+          return v
+        }
+      }
+      if (target.t !== 'member') {
+        return s => {
+          const v = value(s)
+          bind(target, v, s, 'assign')
 
           return v
         }
@@ -1041,14 +1368,22 @@ function compileExpr(node: Node): Eval {
   throw new ScriptError(`cannot run ${node.t}`)
 }
 
-const toList = (v: V): V[] => (Array.isArray(v) ? v : typeof v === 'string' ? [...v] : [])
+const toList = (v: V): V[] => {
+  const list = Array.isArray(v) ? v : typeof v === 'string' ? (cost(v.length), [...v]) : []
+  cost(list.length)
 
-// A block's statements, its function declarations hoisted.
-function compileBody(body: Node[]): Exec {
+  return list
+}
+
+// A block's statements, its function declarations hoisted; a function body
+// also has its var names from the start.
+function compileBody(body: Node[], isFunction = false): Exec {
   const hoisted = body.filter(n => n.t === 'fnDecl').map(n => ({ name: n.name as string, make: evalNode(n.fn) }))
   const steps = body.filter(n => n.t !== 'fnDecl').map(execNode)
+  const vars = isFunction ? varNames(body) : []
 
   return s => {
+    for (const name of vars) if (!s.vars.has(name)) s.vars.set(name, undefined)
     for (const h of hoisted) s.declare(h.name, h.make(s))
     for (const step of steps) {
       const signal = step(s)
@@ -1135,8 +1470,9 @@ function compileStmt(node: Node): Exec {
       const update = node.update ? evalNode(node.update) : undefined
       const body = execNode(node.body)
       // As in JavaScript, each turn of a for (let ...) loop gets its own copy
-      // of the loop's variables, so closures made in it keep that turn's.
-      const isPerTurn = node.init?.t === 'decl' && node.init.kind !== 'var'
+      // of the loop's variables, so closures made in it keep that turn's;
+      // a loop that makes no closures needs no copies.
+      const isPerTurn = node.init?.t === 'decl' && node.init.kind !== 'var' && hasFn([node.test, node.update, node.body])
 
       return s => {
         let scope = new Scope(s)
@@ -1187,7 +1523,7 @@ function compileStmt(node: Node): Exec {
 
       return s => {
         const v = iter(s)
-        const items = isOf ? toList(v) : Array.isArray(v) || typeof v === 'string' ? Object.keys(toList(v)) : isObj(v) ? Object.keys(v) : []
+        const items = isOf ? toList(v) : Array.isArray(v) || typeof v === 'string' ? Object.keys(toList(v)) : isObj(v) ? keysOf(v) : []
         for (const item of items) {
           burn()
           const scope = new Scope(s)
@@ -1248,7 +1584,7 @@ const noise2 = (x: number, y: number) => {
   return top + (bottom - top) * v
 }
 
-const MATH = obj({
+const MATH = Object.freeze(obj({
   PI: Math.PI,
   E: Math.E,
   ...Object.fromEntries(
@@ -1259,7 +1595,7 @@ const MATH = obj({
   min: (...v: number[]) => Math.min(...v),
   max: (...v: number[]) => Math.max(...v),
   random: () => Math.random(),
-})
+}))
 
 const withStatics = (f: (...a: V[]) => V, statics: Record<string, V>) => {
   STATICS.set(f, statics)
@@ -1269,27 +1605,32 @@ const withStatics = (f: (...a: V[]) => V, statics: Record<string, V>) => {
 
 const BUILTINS: Record<string, V> = {
   Math: MATH,
-  Array: withStatics((...a: V[]) => (a.length === 1 && typeof a[0] === 'number' ? new Array(checkLength(a[0])) : a), {
+  Array: withStatics((...a: V[]) => (a.length === 1 && typeof a[0] === 'number' ? (cost(a[0]), new Array(checkLength(a[0]))) : a), {
     from: (src: V, f?: V) => {
       const n = Array.isArray(src) || typeof src === 'string' ? toList(src).length : isObj(src) ? Number(src.length) || 0 : 0
-      const items = Array.isArray(src) || typeof src === 'string' ? toList(src) : Array.from({ length: checkLength(n) })
+      const items = Array.isArray(src) || typeof src === 'string' ? toList(src) : (cost(n), Array.from({ length: checkLength(n) }))
 
       return f === undefined ? [...items] : items.map((v, i) => call(f, [v, i]))
     },
     isArray: (v: V) => Array.isArray(v),
   }),
-  Object: obj({
-    keys: (v: V) => (isObj(v) ? Object.keys(v) : Array.isArray(v) ? Object.keys(v) : []),
-    values: (v: V) => (isObj(v) ? Object.values(v) : Array.isArray(v) ? [...v] : []),
-    entries: (v: V) => (isObj(v) ? Object.entries(v) : []),
-    assign: (t: V, ...src: V[]) => (isObj(t) ? Object.assign(t, ...src.filter(isObj)) : t),
-  }),
-  Number: (v: V) => Number(v),
-  String: (v: V) => String(v),
+  Object: Object.freeze(obj({
+    keys: (v: V) => (isObj(v) || Array.isArray(v) ? sized(Object.keys(v)) : []),
+    values: (v: V) => (isObj(v) ? sized(Object.values(v)) : Array.isArray(v) ? [...sized(v)] : []),
+    entries: (v: V) => (isObj(v) ? sized(Object.entries(v)) : []),
+    assign: (t: V, ...src: V[]) => {
+      if (!isObj(t)) return t
+      if (Object.isFrozen(t)) throw new ScriptError('built-in objects are read-only')
+
+      return Object.assign(t, ...src.filter(isObj).map(o => (keysOf(o), o)))
+    },
+  })),
+  Number: (v: V) => Number(operand(v)),
+  String: (v: V) => str(v),
   Boolean: (v: V) => Boolean(v),
-  parseInt: (v: V, b?: V) => parseInt(String(v), b),
-  parseFloat: (v: V) => parseFloat(String(v)),
-  isNaN: (v: V) => Number.isNaN(Number(v)),
+  parseInt: (v: V, b?: V) => parseInt(text(str(v)), b),
+  parseFloat: (v: V) => parseFloat(text(str(v))),
+  isNaN: (v: V) => Number.isNaN(Number(operand(v))),
   Infinity,
   NaN,
   // The expression language's functions by their bare names too, since
@@ -1311,19 +1652,15 @@ const BUILTINS: Record<string, V> = {
 
 export type Program = {
   // Runs the top level once, with these names defined first.
-  start: (globals: Record<string, V>, budget: number) => void
+  // `ms` is how long by the clock either may run.
+  start: (globals: Record<string, V>, budget: number, ms?: number) => void
   // Updates these names, then calls the code's function `name` if it has one.
-  call: (name: string, args: V[], globals: Record<string, V>, budget: number) => V
+  call: (name: string, args: V[], globals: Record<string, V>, budget: number, ms?: number) => V
 }
 
 // Parses source into a program, or throws a ScriptError saying what is wrong.
 export function parseProgram(source: string): Program {
-  const body = compileBody(parse(source))
-  const root = new Scope()
-  for (const [k, v] of Object.entries(BUILTINS)) root.declare(k, v)
-  const scope = new Scope(root)
-  const run = <T>(budget: number, f: () => T): T => {
-    fuel = budget
+  const guard = <T>(f: () => T): T => {
     try {
       return f()
     } catch (e) {
@@ -1332,15 +1669,25 @@ export function parseProgram(source: string): Program {
       throw new ScriptError(e instanceof Error ? e.message : String(e))
     }
   }
+  const body = guard(() => compileBody(parse(source), true))
+  const root = new Scope()
+  for (const [k, v] of Object.entries(BUILTINS)) root.declare(k, v)
+  const scope = new Scope(root, true)
+  const run = <T>(budget: number, ms: number, f: () => T): T => {
+    fuel = budget
+    deadline = performance.now() + ms
+
+    return guard(f)
+  }
 
   return {
-    start: (globals, budget) =>
-      run(budget, () => {
+    start: (globals, budget, ms = 1000) =>
+      run(budget, ms, () => {
         for (const [k, v] of Object.entries(globals)) root.declare(k, v)
         body(scope)
       }),
-    call: (name, args, globals, budget) =>
-      run(budget, () => {
+    call: (name, args, globals, budget, ms = 1000) =>
+      run(budget, ms, () => {
         for (const [k, v] of Object.entries(globals)) root.declare(k, v)
         if (!scope.vars.has(name)) return undefined
 

@@ -88,3 +88,55 @@ test('a quiet beat after a scene whose code broke asks for a new scene, not a co
   expect(asked).toContain('[world: ')
   expect(asked.includes('[playing: ')).toBe(false)
 })
+
+test('editing the history drops its thinking blocks, so collapsing and cutting work with thinking on', () => {
+  const thought = (concept: string) =>
+    JSON.stringify({
+      content: [
+        { type: 'thinking', thinking: '', signature: 'sig' },
+        { type: 'text', text: JSON.stringify({ concept, code: 'function frame() {}', background: { effect: 'rain', palette: ['#0a0', '#0f0'], speed: 1, intensity: 0.5 }, actors: [], particles: [] }) },
+      ],
+      stop_reason: 'end_turn',
+      usage: { output_tokens: 500 },
+    })
+  const thread = createThread('claude-opus-5-5')
+  const messages = () => JSON.parse(thread.request('bearer').body).messages as { role: string; content: string | { type: string; text?: string }[] }[]
+  const thinking = () => messages().filter(m => Array.isArray(m.content) && m.content.some(b => b.type === 'thinking')).length
+  for (let i = 0; i < 11; i++) {
+    thread.ask(`[strip 80x9]\n+${i}s -> started Read \`f${i}.ts\``)
+    thread.accept(thought(`scene ${i}`))
+  }
+  // Appended only so far: every reply still holds its thinking.
+  expect(thinking()).toBe(11)
+  thread.ask('[strip 80x9]\n+12s -> started Read `g.ts`')
+  thread.accept(thought('scene 11'))
+  // The oldest six collapsed to their concepts; nothing keeps thinking now.
+  const replies = messages().filter(m => m.role === 'assistant')
+  expect(replies.slice(0, 6).every(m => Array.isArray(m.content) && !m.content[0]?.text?.includes('function frame'))).toBe(true)
+  expect(replies.slice(6).every(m => Array.isArray(m.content) && m.content.some(b => b.text?.includes('function frame')))).toBe(true)
+  expect(thinking()).toBe(0)
+  // A cut keeps the tail without its thinking, and says the task again.
+  thread.ask('[strip 80x9]\n[task] fix the build')
+  thread.accept(thought('scene 12'))
+  for (let i = 13; i < 32; i++) {
+    thread.ask(`[strip 80x9]\n+${i}s -> started Read \`h${i}.ts\``)
+    thread.accept(thought(`scene ${i}`))
+  }
+  expect(messages().length).toBeLessThan(60)
+  // Only replies appended since the last edit still think.
+  expect(thinking()).toBeLessThan(6)
+  expect(messages()[0]?.content).toContain('[task] fix the build')
+})
+
+test('a reset begins the conversation again with the task', () => {
+  const thread = createThread('claude-sonnet-5-5')
+  thread.ask('[strip 80x9]\n[task] find bugs')
+  thread.accept(scene('a stakeout'))
+  thread.ask('[strip 80x9]\n+9s -> started Grep `TODO`')
+  thread.abandon()
+  thread.reset()
+  thread.ask('[strip 80x9]\n+9s -> started Grep `TODO`')
+  const messages = JSON.parse(thread.request('bearer').body).messages as { content: string }[]
+  expect(messages.length).toBe(1)
+  expect(messages[0]?.content.startsWith('[task] find bugs\n[strip 80x9]\n+9s')).toBe(true)
+})

@@ -136,12 +136,14 @@ toward the same limits, each in proportion to its cost.
   the glyph whose density matches its brightness (`" .,:;-=+*#%@"`), the
   classic terminal look. Distance fog reads as depth. Code builds boxes, spheres,
   cylinders, cones, planes or its own meshes and draws them shaded or as
-  wireframes; `clawd3d()` stands Clawd at a world point, sized by distance,
-  and `project()` maps a world point to the strip for labels and bubbles.
+  wireframes; `clawd3d()` stands Clawd at a world point as a lit solid (a
+  chamfered block with feet and claws, its eyes flat pixel art on its face),
+  sized by distance and kept above the strip's bottom edge, and `project()` maps a world point to the strip for labels and bubbles.
 - **Sandbox:** plugins have no `eval`, and the code comes from a model reading
   your repo, so it runs in the interpreter alone: it can reach nothing but its
   own values and the drawing calls. Every step burns fuel (1M for setup, 150k
-  per frame), so a runaway loop stops the scene, not the terminal. An error is
+  per frame) and a frame may run for at most 80ms, so a runaway loop or a
+  fill the size of the world stops the scene, not the terminal. An error is
   reported back to the model so it can fix the mistake.
 - **Variety:** each scene names its concept. Each request lists the last six to
   avoid and deals a random world (deep sea, wild west, cooking show... 50 in

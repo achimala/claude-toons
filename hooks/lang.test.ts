@@ -1,6 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 
 import { parseProgram, ScriptError } from './lang'
+import { box, prepare } from './render3d'
 import { cleanScript, stage } from './script'
 
 // Runs source and returns what its result() function answers.
@@ -47,6 +48,32 @@ test('a runaway program stops with an error instead of hanging', () => {
   expect(() => parseProgram('let x = ;')).toThrow(ScriptError)
 })
 
+test('work the host does on one step still ends by the clock', () => {
+  // Copying a huge object and reading a long string as a number burn almost
+  // no fuel; the frame's time budget stops them instead.
+  const timed = (source: string) => {
+    const program = parseProgram(source)
+    program.start({}, 1_000_000, 2000)
+    const began = performance.now()
+    expect(() => program.call('frame', [], {}, 150_000, 40)).toThrow('took too long')
+    expect(performance.now() - began).toBeLessThan(1000)
+  }
+  timed('const o = {}; for (let i = 0; i < 50000; i++) o["k" + i] = i; function frame() { for (let i = 0; i < 30000; i++) { const c = {...o} } }')
+  timed('const o = {}; for (let i = 0; i < 50000; i++) o["k" + i] = i; function frame() { for (let i = 0; i < 30000; i++) for (const k in o) break }')
+  timed('const a = "1".repeat(100000); function frame() { let n = 0; for (let i = 0; i < 1e6; i++) n += +a; return n }')
+  timed('const a = "1".repeat(100000); function frame() { let n = 0; for (let i = 0; i < 1e6; i++) n += parseInt(a); return n }')
+})
+
+test('objects coerce as in JavaScript, ?.5 is a ternary, and methods see this', () => {
+  expect(run('function result() { const o = {}; return [o == 1, o < 1, o - 1, isNaN(o), [{a: 2}, {a: 1}].sort().length, o == o, o == {}] }')).toEqual([false, false, NaN, true, 2, true, false])
+  expect(run('function result() { const o = {}; const k = {}; o[k] = 3; return o["[object Object]"] }')).toBe(3)
+  expect(run('function result() { const t = 1; return t > 0 ? .5 : .25 }')).toBe(0.5)
+  expect(run('function result() { const t = 1; return t>0?.5:.25 }')).toBe(0.5)
+  expect(run('function result() { const o = {x: 4, f() { return this.x }, g() { return [1].map(() => this.x)[0] }}; return [o.f(), o.g(), o?.f()] }')).toEqual([4, 4, 4])
+  expect(() => run('function result() { const o = {}; return typeof o.a.b }')).toThrow(ScriptError)
+  expect(run('function result() { return typeof nothingHere }')).toBe('undefined')
+})
+
 const SCENE = { background: { effect: 'starfield', palette: ['#fff', '#88f'], speed: 1, intensity: 0 }, actors: [], particles: [] }
 const decode = (cells: string) => new Uint32Array(Uint8Array.from(atob(cells), c => c.charCodeAt(0)).buffer)
 const charAt = (words: Uint32Array, cols: number, x: number, y: number) => String.fromCodePoint(words[(y * cols + x) * 3] ?? 0x20)
@@ -74,6 +101,39 @@ test('scene code that breaks stops, says why, and the rest still draws', () => {
   expect(script?.code?.error).toContain('nope is not defined')
   expect(cleanScript({ ...SCENE, code: 'let = 3' })?.code?.error).toBeDefined()
   expect(cleanScript({ ...SCENE, code: '' })?.code).toBeUndefined()
+})
+
+test('a mesh that is legal but absurd is drawn or stopped within the frame budget', () => {
+  const timed = (code: string) => {
+    const script = cleanScript({ ...SCENE, code })
+    const began = performance.now()
+    const cells = script && stage({ cols: 80, rows: 9, t: 0, script, since: 100, reveal: 1 })
+    expect(cells?.length).toBeGreaterThan(0)
+    expect(performance.now() - began).toBeLessThan(600)
+
+    // Drawn whole, or stopped at the frame's deadline: either, but never a hang.
+    return script?.code?.error ?? 'took more than'
+  }
+  // 20,000 faces on three vertices: preparing it was quadratic in the faces around a vertex.
+  expect(timed('function frame() { const f = Array(60000).fill(0); for (let i = 0; i < 60000; i += 3) { f[i + 1] = 1; f[i + 2] = 2 } mesh3d({verts: [0,0,0, 1,0,0, 0,1,0], faces: f}) }')).toContain('took more than')
+  // One polygon of 99,999 indices fans into as many triangles.
+  expect(timed('const big = Array(99999).fill(0); for (let i = 0; i < 99999; i++) big[i] = i % 3; function frame() { mesh3d({verts: [0,0,0, 1,0,0, 0,1,0], faces: Array(20).fill(big)}) }')).toContain('took more than')
+  // Thousands of triangles each covering the whole strip, each nearer than the last.
+  expect(timed('function frame() { const v = [], f = []; for (let i = 0; i < 6000; i++) { const z = 8 - i * 0.001; v.push(-100,-100,z, 100,-100,z, 0,100,z); f.push(i*3, i*3+1, i*3+2) } mesh3d({verts: v, faces: f}) }')).toContain('took more than')
+  // A corner at infinity owns nothing.
+  expect(timed('function frame() { mesh3d(box(1e308, 1e308, 1e308)); mesh3d(box(1, 1, 1), {z: -3}) }')).toBe('took more than')
+  // Loops of clawd() and say() count against the frame's time.
+  expect(timed('function frame() { for (let i = 0; i < 60000; i++) clawd(10, 2, {scale: 4}) }')).toContain('too long')
+  expect(timed('function frame() { for (let i = 0; i < 70000; i++) say("hello there", 10, 4) }')).toContain('too long')
+})
+
+test('primitives are shared by their arguments, and text from objects does not break the scene', () => {
+  const shared = cleanScript({ ...SCENE, code: 'function frame() { if (sphere(1, 48) !== sphere(1, 48) || box(1, 2, 3) === box(1, 2, 4)) nope() }' })
+  stage({ cols: 40, rows: 9, t: 0, script: shared!, since: 100, reveal: 1 })
+  expect(shared?.code?.error).toBeUndefined()
+  const script = cleanScript({ ...SCENE, code: 'function frame() { text(0, 0, {a: 1}); say({a: 1}, 0, 0); text(0, 1, [{a: 1}, 2]); put(0, 2, {}) }' })
+  stage({ cols: 40, rows: 9, t: 0, script: script!, since: 100, reveal: 1 })
+  expect(script?.code?.error).toBeUndefined()
 })
 
 test('switch works and each for (let ...) turn keeps its own variable', () => {
@@ -164,13 +224,77 @@ test('a nearer mesh drawn after clawd3d covers it, and a farther one does not', 
   const render = (z: number) => {
     const script = cleanScript({ ...SCENE, code: `function frame() { clawd3d(0, 0, 0, {size: 1.5}); mesh3d(box(6, 3, 0.2), {y: 1.5, z: ${z}, color: "#ffffff"}) }` })
     const words = decode(script ? stage({ cols: 120, rows: 9, t: 0, script, since: 100, reveal: 1 }) : '')
+    // Clawd is lit, so any shade of its orange counts.
+    const isOrange = (c: number | undefined) => {
+      if (c === undefined) return false
+      const r = (c >> 16) & 255
+      const g = (c >> 8) & 255
+      const b = c & 255
+
+      return r > 60 && r > g + 20 && g > b
+    }
     let orange = 0
-    for (let y = 0; y < 9; y++) for (let x = 0; x < 120; x++) if (colorAt(words, 120, x, y) === 0xd97757) orange += 1
+    for (let y = 0; y < 9; y++) for (let x = 0; x < 120; x++) if (isOrange(colorAt(words, 120, x, y)) || isOrange(backAt(words, 120, x, y))) orange += 1
 
     return orange
   }
   expect(render(4)).toBe(0)
   expect(render(-4)).toBeGreaterThan(20)
+})
+
+// A scene staged at the usual size, and the cells of one color in it.
+const staged = (code: string) => {
+  const script = cleanScript({ ...SCENE, code })
+  expect(script?.code?.error).toBeUndefined()
+
+  return decode(script ? stage({ cols: 120, rows: 9, t: 0, script, since: 100, reveal: 1 }) : '')
+}
+const cellsOf = (words: Uint32Array, color: number) => {
+  const found: [number, number][] = []
+  for (let y = 0; y < 9; y++) for (let x = 0; x < 120; x++) if (colorAt(words, 120, x, y) === color || backAt(words, 120, x, y) === color) found.push([x, y])
+
+  return found
+}
+
+test('a plain floor receding to the horizon gets no rim band', () => {
+  // Unlit and unfogged, so every cell the floor covers is exactly its color;
+  // a rim would darken the far rows to 45%.
+  const words = staged('function frame() { fog(1000, 2000); mesh3d(plane(200, 200), {color: "#cccccc", unlit: true}) }')
+  const rim = Math.round(0xcc * 0.45)
+  expect(cellsOf(words, (rim << 16) | (rim << 8) | rim)).toEqual([])
+  const floor = cellsOf(words, 0xcccccc)
+  expect(floor.length).toBeGreaterThan(400)
+  expect(floor.some(([, y]) => y <= 2)).toBe(true)
+  // The rim still marks a nearer slab in front of a farther one.
+  const over = staged('function frame() { fog(1000, 2000); mesh3d(box(4, 4, 0.2), {x: 1.5, y: 1, z: -4, color: "#cccccc", unlit: true}); mesh3d(box(2, 2, 0.2), {x: -0.5, y: 1, color: "#cccccc", unlit: true}) }')
+  expect(cellsOf(over, (rim << 16) | (rim << 8) | rim).length).toBeGreaterThan(3)
+})
+
+test('a wire box draws its twelve edges, with no diagonal across a face', () => {
+  expect(prepare(box(1, 1, 1)).edges.length).toBe(24)
+  // Seen head-on, the front face's center cell holds no edge.
+  const words = staged('function frame() { fog(1000, 2000); camera(0, 1, 9, 0, 1, 0); mesh3d(box(4, 4, 4), {y: 1, wire: true, color: "#ffffff"}) }')
+  const wire = cellsOf(words, 0xffffff)
+  // Four vertical edges cross the strip (each one or two columns wide, as
+  // its dabs fall); the rest of the box is above and below the strip.
+  expect(wire.length).toBeGreaterThanOrEqual(36)
+  expect(wire.length).toBeLessThanOrEqual(72)
+  expect(wire.filter(([x]) => x > 50 && x < 70)).toEqual([])
+})
+
+test('a line cut at the near plane is drawn without gaps', () => {
+  const words = staged('function frame() { fog(1000, 2000); line3d(6, 0, 20, 6, 0, -40, "#ffffff") }')
+  const line = cellsOf(words, 0xffffff)
+  expect(line.length).toBeGreaterThan(40)
+  // Each row's cells run unbroken, and each row's run touches the next.
+  const runs = Array.from({ length: 9 }, (_, y) => line.filter(([, row]) => row === y).map(([x]) => x))
+  const drawn = runs.filter(r => r.length > 0)
+  expect(drawn.length).toBeGreaterThan(6)
+  for (const run of drawn) expect(Math.max(...run) - Math.min(...run) + 1).toBe(run.length)
+  for (let i = 0; i + 1 < drawn.length; i++) {
+    expect(Math.min(...drawn[i + 1]!)).toBeLessThanOrEqual(Math.max(...drawn[i]!) + 1)
+    expect(Math.max(...drawn[i + 1]!)).toBeGreaterThanOrEqual(Math.min(...drawn[i]!) - 1)
+  }
 })
 
 test('a pixel drawn over a quarter-block edge keeps the other half', () => {
