@@ -18,7 +18,7 @@ Each user message starts with the strip's size, "[strip 120x9]" (columns x rows)
 - "[task] ..." is what the developer asked for.
 - "-> started Bash \`npm test\`" means Claude just launched a tool; "<- done after 12s: Bash \`npm test\`" or "<- failed: 3 tests failing ... after 12s: Bash \`npm test\`" means it finished.
 - "[Claude is thinking]" or "[Claude is writing the reply]" means Claude turned to thinking or to writing its answer.
-- "still running Bash \`npm test\` (25s so far)" or "still thinking (15s so far)" means nothing new has happened for a while. Answer it with the next beat of the scene that is already playing: keep its set and cast and move the action along (the rocket's countdown reaches 1, the crane lifts the next block, the detective turns another page), so the story keeps progressing during long waits instead of starting over.
+- "still running Bash \`npm test\` (25s so far)" or "still thinking (15s so far)" means nothing new has happened for a while. If the scene playing animates on its own (it has code, or motion that keeps going), answer {"continue": true} with everything else empty: the cheapest reply, and the scene simply keeps playing. Only when it has run out of motion, or a next beat would clearly be better (the countdown reaches 1, the crane lifts the next block), answer the next beat of the same scene: keep its set and cast and move the action along, never start over.
 - "[turn finished]" means Claude stopped.
 - "[your last scene's code stopped: ...]" means the code you wrote hit an error or ran out of time, and the error. Fix that mistake from now on.
 - "[recent scenes: ...]" lists the concepts of your last few scenes. Do not repeat any of them, or anything close.
@@ -60,7 +60,7 @@ Drawing (x is the column, y the row, 0,0 top-left; anything off the strip is cli
 - rgb(r, g, b), hsl(hue 0-360, sat 0-1, light 0-1), mix(c1, c2, k) make colors
 - clamp(v, lo, hi), lerp(a, b, k), smoothstep(a, b, v), fract(v), mod(a, b), rand(n) (a fixed random number per n), noise(x) and noise2(x, y) (smooth noise in [0,1)), and Math.random()
 3D: the strip can also be a window into a world. Surfaces are lit smoothly (diffuse plus a highlight) and drawn as solid cells in their lit color with block-glyph edges, clean and flat; a mesh given ascii: true is drawn instead as glyphs as dense as its brightness (" .,:;-=+*#%@"), the classic terminal look, good for a planet, a donut, a curved hero object, not for floors and walls. Give surfaces mid-to-light colors (dark ones vanish into the fog), and keep the camera and light steady or moving smoothly. camera(ex, ey, ez, tx, ty, tz, fov) sets the eye, what it looks at, and the angle it sees across (default eye 0,2.5,9 looking at 0,1,0, fov 90: at the origin that shows about 20 units across and 3 units tall, so the world is wide and low, like the strip; build things about 1 to 2 units tall and spread them left to right, and move the camera to fly, orbit or dolly). light(dx, dy, dz, ambient) is the direction toward the light; fog(near, far, color) fades things with distance (default 8 to 40 into black: that is the depth cue, keep it). Shapes: box(w, h, d) (centered), sphere(r, segments), cylinder(r, h, segments) and cone(r, h, segments) (standing on y 0), plane(w, d) (flat on the ground), or your own {verts: [x,y,z,...], faces: [[i,j,k,...], ...]}. mesh3d(mesh, {x, y, z, rx, ry, rz, scale, color, wire, unlit, ascii}) draws one, lit smoothly; wire draws its edges; unlit skips the lighting; ascii uses the glyph ramp. line3d(x0,y0,z0, x1,y1,z1, color) and point3d(x, y, z, color) for rails, rain, stars. clawd3d(x, y, z, options) puts Clawd standing at a world point, sized by distance (options as clawd, plus size: its height in units, 0.9 by default: about as tall as a crate, a third of the strip at the camera's target; it is never drawn taller than most of the strip), so it can walk down a road into the distance; it returns the same anchors, or null behind the camera. project(x, y, z) gives {x, y, px, py, depth, scale} for placing text, a bubble or 2D art at a world point. Everything 3D in a frame shares one depth buffer, so later draws go behind nearer ones. The camera, light and fog keep between frames. Good 3D scenes: a road or rails vanishing to a point with things passing, a planet with a moon orbiting, a city of boxes at night, a tunnel flying through, a chessboard, a spinning gear, a crane lifting a crate, an orbiting camera around one hero object. Keep it to a few dozen shapes; big flat-shaded shapes read better than detail at this size. Mix freely with 2D: a 3D set behind a 2D Clawd, or text labels placed with project().
-The code draws over the background effect and particles and under the actors. Keep each frame light: a few thousand steps is fine (a loop over every cell of the strip with a little math each is fine), heavy nested loops are not, and a frame that runs too long or throws stops the code for the rest of the scene. When the code draws everything, leave actors and particles empty and set the background's intensity to 0. When the code draws Clawd and its speech, do not also add a "clawd" actor. "" for no code.
+Write the code compactly: no comments, no blank lines, short names, nothing decorative, and keep it under about 60 lines; every token of it is paid for. The code draws over the background effect and particles and under the actors. Keep each frame light: a few thousand steps is fine (a loop over every cell of the strip with a little math each is fine), heavy nested loops are not, and a frame that runs too long or throws stops the code for the rest of the scene. When the code draws everything, leave actors and particles empty and set the background's intensity to 0. When the code draws Clawd and its speech, do not also add a "clawd" actor. "" for no code.
 
 A code example, for the shape of it (do not copy the idea):
 let drops = Array.from({length: 40}, (_, i) => ({x: rand(i) * w, y: rand(i + 50) * h, v: 4 + rand(i + 99) * 6}))
@@ -109,6 +109,7 @@ function frame(t, dt) {
 }
 
 Reply with one scene as JSON matching the schema:
+- continue: true to keep the scene that is playing exactly as it is (for a "still ..." update), with every other field empty; false for a new scene or a next beat.
 - concept: one short line naming the scene's world, metaphor and shot, e.g. "wild west: Clawd as sheriff nailing a wanted poster for auth.ts to a saloon wall". Decide it first.
 - code: the scene's program, or "".
 - actors: up to 20, each with kind ("clawd" or "sprite"), frames (for a sprite: 1 to 12 frames, each a string with lines separated by \\n, at most 9 lines and 80 characters wide, every frame the same size; for Clawd: []), fps (0 for a still), frame (an expression picking the frame index, wrapped to the frame count, or "" to cycle by fps), show (an expression: the actor is drawn only while it is above 0, or "" for always), x and y (expressions for the top-left cell; columns 0 to w-1, rows 0 to h-1, and anything off the strip is simply clipped), color (hex; Clawd's is "#d97757"), say ("" for nothing, else at most 60 characters), and sayAt (seconds into the scene when it starts talking).
@@ -171,8 +172,8 @@ const KEEP = 30
 // stay whole (a "still" beat continues the latest), and once BATCH more have
 // piled up behind them they are collapsed together, so the cached prefix is
 // rebuilt once per batch rather than on every request.
-const FULL = 8
-const BATCH = 8
+const FULL = 6
+const BATCH = 6
 
 // A line of the log that only says something is still going.
 const isQuiet = (line: string) => /^\+\d+s still /.test(line)
@@ -180,6 +181,7 @@ const isQuiet = (line: string) => /^\+\d+s still /.test(line)
 const SCHEMA = {
   type: 'object',
   properties: {
+    continue: { type: 'boolean' },
     concept: { type: 'string' },
     code: { type: 'string' },
     actors: {
@@ -229,7 +231,7 @@ const SCHEMA = {
       additionalProperties: false,
     },
   },
-  required: ['concept', 'code', 'actors', 'particles', 'background'],
+  required: ['continue', 'concept', 'code', 'actors', 'particles', 'background'],
   additionalProperties: false,
 }
 
@@ -237,7 +239,7 @@ type Block = Record<string, unknown>
 type Message = { role: 'user' | 'assistant'; content: string | Block[] }
 
 // A scene, or why there is none, and what the call spent when one was made.
-export type Narration = { script?: Script; error?: string; spent?: CallUsage }
+export type Narration = { script?: Script; isContinued?: boolean; error?: string; spent?: CallUsage }
 
 export const URL = 'https://api.anthropic.com/v1/messages'
 
@@ -273,7 +275,7 @@ export function createThread(model: Model, options: { isThinking?: boolean } = {
     }
     const recent = concepts.slice(-RECENT)
     const steer = lines.length > 0 && lines.every(isQuiet)
-      ? recent.length > 0 ? [`[continue: ${recent[recent.length - 1]}]`] : []
+      ? [`[playing: ${recent[recent.length - 1] ?? 'the first scene'}; answer continue: true to keep it, or its next beat]`]
       : [...(recent.length > 0 ? [`[recent scenes: ${recent.join(' / ')}]`] : []), `[world: ${deal(random)}]`, `[style: ${STYLES[Math.floor(random() * STYLES.length)]}]`]
     messages.push({ role: 'user', content: [activity, ...steer].join('\n') })
   }
@@ -357,7 +359,7 @@ export function createThread(model: Model, options: { isThinking?: boolean } = {
 
     const content = typeof open?.content === 'string' ? open.content : ''
 
-    return content.split('\n').filter(line => !/^\[(recent scenes|world|style|continue): /.test(line)).join('\n')
+    return content.split('\n').filter(line => !/^\[(recent scenes|world|style|playing): /.test(line)).join('\n')
   }
 
   // Closes the exchange with the reply, kept whole, and reads its scene.
@@ -382,7 +384,8 @@ export function createThread(model: Model, options: { isThinking?: boolean } = {
     if (reply.stop_reason === 'refusal') return { error: 'the buddy declined to draw that one', spent }
     const answer = reply.content.find(block => block.type === 'text')?.text
     try {
-      const raw = JSON.parse(typeof answer === 'string' ? answer : '') as { concept?: unknown }
+      const raw = JSON.parse(typeof answer === 'string' ? answer : '') as { concept?: unknown; continue?: unknown }
+      if (raw?.continue === true) return { isContinued: true, spent }
       if (typeof raw?.concept === 'string' && raw.concept.trim()) concepts.push(raw.concept.trim().slice(0, 140))
       const script = cleanScript(raw)
 

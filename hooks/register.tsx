@@ -275,6 +275,9 @@ function ask($: EngineInterface, b: Buddy) {
           b.scene = told.script
           b.sceneAt = await $.clock.now()
           b.error = undefined
+        } else if (told.isContinued) {
+          // The scene playing keeps playing.
+          b.error = undefined
         } else {
           if (told.error && told.error !== b.error) $.ui.toast(`toons: ${told.error}`)
           b.error = told.error
