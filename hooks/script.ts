@@ -17,7 +17,32 @@ import {
   type Background,
   type Rgb,
 } from './effects'
-import { parseProgram, type Program } from './lang'
+import { CLAWD_H, CLAWD_ORANGE, CLAWD_W, LOOK, clawdAnchors, clawdPixels, type Anchors, type ClawdLook, type Eyes, type Pose } from './clawd'
+import { obj, parseProgram, type Program } from './lang'
+import {
+  DEFAULT_CAMERA,
+  DEFAULT_FOG,
+  DEFAULT_LIGHT,
+  MOST_TRIANGLES,
+  box,
+  createDepth,
+  cylinder,
+  drawLine,
+  drawMesh,
+  drawPoint,
+  plane,
+  project,
+  resolve,
+  sphere,
+  type Camera,
+  type Fog,
+  type Light,
+  type Mesh,
+  type Target,
+  type Transform,
+  type Vec3,
+  type View,
+} from './render3d'
 
 type Env = { t: number; w: number; h: number; k: number; n: number }
 type Expr = (env: Env) => number
@@ -190,6 +215,10 @@ export type Code = {
   isReported?: boolean
   // When each line the code has Clawd say first showed, for the typing.
   said: Map<string, number>
+  // The 3D settings, kept between frames once the code sets them.
+  cam?: Camera
+  light?: Light
+  fog?: Fog
 }
 
 export type Script = {
@@ -272,58 +301,24 @@ export function cleanScript(raw: unknown): Script | undefined {
   return { background, actors, swarms, code: cleanCode(s.code) }
 }
 
-// Clawd in pixel art, two pixels to a cell's height: B body, A arm, E eye.
-// Its four legs are drawn per pose, down to a ground line at pixel row 6. For
-// layout it fills a 14 by 4 cell box.
-const CLAWD = [
-  '..BBBBBBBBBB..',
-  '..BBEBBBBEBB..',
-  'AABBEBBBBEBBAA',
-  '..BBBBBBBBBB..',
-  '..BBBBBBBBBB..',
-]
-const CLAWD_W = 14
-const CLAWD_BOX = Array.from({ length: 4 }, () => '█'.repeat(CLAWD_W))
-const LEGS = [3, 5, 8, 10]
-const GROUND = 6
-const EYE: Rgb = [42, 22, 16]
-
-// `stride` is the walk frame, 0 to 3, or -1 standing.
-type Pose = { stride: number; facing: number; isBlinking: boolean }
-
-// Clawd's pixels for a pose, in one flat color. Walking is a four-frame trot:
-// legs straight with the body up a pixel, then the body down with one pair of
-// feet lifted off the ground, straight again, then the other pair lifted.
-// Planted feet stay on the ground line; the legs stretch to meet the body.
-function clawdPixels(pose: Pose, base: Rgb) {
-  const pixels: { x: number; y: number; c: Rgb }[] = []
-  // Eyes go on last, so a body pixel never covers one that looked aside.
-  const eyes: { x: number; y: number; c: Rgb }[] = []
-  const isUp = pose.stride === 0 || pose.stride === 2
-  const lift = isUp ? -1 : 0
-  CLAWD.forEach((row, y) =>
-    [...row].forEach((c, x) => {
-      if (c === '.') return
-      pixels.push({ x, y: y + lift, c: base })
-      if (c === 'E' && !(pose.isBlinking && y === 1)) eyes.push({ x: x + pose.facing, y: y + lift, c: EYE })
-    }),
-  )
-  const top = CLAWD.length + lift
-  LEGS.forEach((x, i) => {
-    const isFirstPair = i === 0 || i === 2
-    const isLifted = (pose.stride === 1 && isFirstPair) || (pose.stride === 3 && !isFirstPair)
-    for (let y = top; y <= (isLifted ? GROUND - 1 : GROUND); y++) pixels.push({ x, y, c: base })
-  })
-
-  return [...pixels, ...eyes]
-}
+// For layout Clawd fills a 14 by 4 cell box (its 8 pixel rows).
+const CLAWD_BOX = Array.from({ length: CLAWD_H / 2 }, () => '█'.repeat(CLAWD_W))
 
 // What the scene's code draws through: set while its frame runs.
 type Canvas = {
+  cols: number
+  rows: number
+  code: Code
   put: (col: number, row: number, char: string, color: Rgb, back?: Rgb) => void
   clear: (col: number, row: number) => void
-  clawd: (x: number, y: number, pose: Pose, color: Rgb) => void
+  // One pixel: a column and a pixel row (two to a cell).
+  pixel: (col: number, py: number, color: Rgb) => void
+  // Clawd with its top-left at a column and a pixel row; where things attach.
+  clawd: (x: number, py: number, look: ClawdLook, scaleTo?: number, depth?: number) => Anchors
   say: (text: string, x: number, y: number, color: Rgb) => void
+  // The frame's 3D target, made on first use.
+  target3d: () => { target: Target; view: View; light: Light; fog: Fog }
+  triangles: number
 }
 let canvas: Canvas | undefined
 
@@ -400,15 +395,102 @@ const API = {
       }
     }
   },
-  // Clawd at x, y (top-left of its 14x4 box); facing -1, 0 or 1; stride 0-3
-  // while walking, -1 standing.
+  // Clawd at x, y (top-left; y in rows, halves allowed), with either the
+  // short form (facing, stride, blink, color) or an options object.
   clawd: (x: unknown, y: unknown, facing?: unknown, stride?: unknown, blink?: unknown, color?: unknown) => {
-    canvas?.clawd(
-      Math.round(num(x)),
-      Math.round(num(y)),
-      { stride: clamp(Math.round(num(stride, -1)), -1, 3), facing: Math.sign(num(facing)), isBlinking: Boolean(blink) },
-      colorOf(color, [217, 119, 87]),
-    )
+    const look = lookOf(facing, stride, blink, color)
+
+    return anchorsOut(canvas?.clawd(Math.round(num(x)), Math.round(num(y) * 2), look), Math.round(num(x)), Math.round(num(y) * 2))
+  },
+  pixel: (x: unknown, py: unknown, color?: unknown) => {
+    canvas?.pixel(Math.round(num(x)), Math.round(num(py)), colorOf(color))
+  },
+  // Pixel art: lines of characters, each mapped to a color by the palette
+  // ("." and " " are transparent; an unmapped character is white).
+  pixels: (x: unknown, py: unknown, art: unknown, palette?: unknown) => {
+    const col = Math.round(num(x))
+    const row = Math.round(num(py))
+    const map = typeof palette === 'object' && palette !== null ? (palette as Record<string, unknown>) : {}
+    String(art ?? '').split('\n').slice(0, 80).forEach((line, dy) => {
+      ;[...line.slice(0, 300)].forEach((c, dx) => {
+        if (c === ' ' || c === '.') return
+        canvas?.pixel(col + dx, row + dy, colorOf(map[c]))
+      })
+    })
+  },
+  // The 3D world: a camera (eye, target, vertical field of view in degrees),
+  // one light (the direction toward it, and ambient 0 to 1), and fog that
+  // fades things out between two depths. Each keeps until set again.
+  camera: (ex: unknown, ey: unknown, ez: unknown, tx?: unknown, ty?: unknown, tz?: unknown, fov?: unknown) => {
+    if (canvas) canvas.code.cam = { eye: [num(ex), num(ey, 2.5), num(ez, 9)], target: [num(tx), num(ty, 1), num(tz)], fov: num(fov, 90) }
+  },
+  light: (dx: unknown, dy: unknown, dz: unknown, ambient?: unknown) => {
+    if (canvas) canvas.code.light = { dir: [num(dx, 0.4), num(dy, 1), num(dz, 0.6)], ambient: clamp(num(ambient, 0.35)) }
+  },
+  fog: (near: unknown, far: unknown, color?: unknown) => {
+    if (canvas) canvas.code.fog = { near: num(near, 8), far: Math.max(num(near, 8) + 0.01, num(far, 40)), color: colorOf(color, [0, 0, 0]) }
+  },
+  box: (w: unknown, h: unknown, d: unknown) => meshOut(box(num(w, 1), num(h, 1), num(d, 1))),
+  sphere: (r: unknown, segments?: unknown) => meshOut(sphere(num(r, 1), num(segments, 8))),
+  cylinder: (r: unknown, h: unknown, segments?: unknown) => meshOut(cylinder(num(r, 1), num(r, 1), num(h, 1), num(segments, 8))),
+  cone: (r: unknown, h: unknown, segments?: unknown) => meshOut(cylinder(num(r, 1), 0, num(h, 1), num(segments, 8))),
+  plane: (w: unknown, d: unknown) => meshOut(plane(num(w, 1), num(d, 1))),
+  // Draws a mesh placed by its options: x, y, z; rx, ry, rz (radians);
+  // scale (one number or [sx, sy, sz]); color; wire (edges only); unlit.
+  mesh3d: (mesh: unknown, options?: unknown) => {
+    if (!canvas) return
+    const m = meshIn(mesh)
+    if (!m) return
+    const o = (typeof options === 'object' && options !== null ? options : {}) as Record<string, unknown>
+    const sc = Array.isArray(o.scale) ? o.scale.map(v => num(v, 1)) : [num(o.scale, 1), num(o.scale, 1), num(o.scale, 1)]
+    const t: Transform = {
+      at: [num(o.x), num(o.y), num(o.z)],
+      rot: [num(o.rx), num(o.ry), num(o.rz)],
+      scale: [sc[0] ?? 1, sc[1] ?? 1, sc[2] ?? 1],
+    }
+    const { target, view, light, fog } = canvas.target3d()
+    canvas.triangles += drawMesh(target, view, light, fog, m, t, { color: colorOf(o.color), wire: Boolean(o.wire), unlit: Boolean(o.unlit) }, MOST_TRIANGLES - canvas.triangles)
+  },
+  line3d: (x0: unknown, y0: unknown, z0: unknown, x1: unknown, y1: unknown, z1: unknown, color?: unknown) => {
+    if (!canvas) return
+    const { target, view, fog } = canvas.target3d()
+    drawLine(target, view, fog, [num(x0), num(y0), num(z0)], [num(x1), num(y1), num(z1)], colorOf(color))
+  },
+  point3d: (x: unknown, y: unknown, z: unknown, color?: unknown) => {
+    if (!canvas) return
+    const { target, view, fog } = canvas.target3d()
+    drawPoint(target, view, fog, [num(x), num(y), num(z)], colorOf(color))
+  },
+  // Where a world point lands: x and y in cells, px and py in pixels, its
+  // depth, and the pixels one world unit covers there; null behind the camera.
+  project: (x: unknown, y: unknown, z: unknown) => {
+    if (!canvas) return null
+    const { view } = canvas.target3d()
+    const p = project(view, [num(x), num(y), num(z)])
+
+    return p ? obj({ x: Math.round(p.x), y: Math.round(p.y / 2), px: Math.round(p.x), py: Math.round(p.y), depth: p.depth, scale: view.f / p.depth }) : null
+  },
+  // Clawd standing at a world point (its feet there), facing the camera,
+  // sized by distance: `size` is its height in world units (1 by default).
+  // Takes the same options as clawd, and returns the same anchors, or null
+  // when it is behind the camera.
+  clawd3d: (x: unknown, y: unknown, z: unknown, options?: unknown) => {
+    if (!canvas) return null
+    const { view, target } = canvas.target3d()
+    const p = project(view, [num(x), num(y), num(z)])
+    if (!p) return null
+    const o = (typeof options === 'object' && options !== null ? options : {}) as Record<string, unknown>
+    const look = lookOf(o)
+    const pixelsTall = (num(o.size, 1) * view.f) / p.depth
+    const s = Math.max(0.15, Math.min(6, pixelsTall / CLAWD_H))
+    const w = Math.round(CLAWD_W * s)
+    const h = Math.round(CLAWD_H * s)
+    const left = Math.round(p.x - w / 2)
+    const top = Math.round(p.y - h)
+    const anchors = canvas.clawd(left, top, look, s, p.depth)
+    void target
+
+    return anchorsOut(anchors, left, top)
   },
   // A speech bubble pointing at x, y.
   say: (text: unknown, x: unknown, y: unknown, color?: unknown) => {
@@ -433,6 +515,90 @@ const API = {
 
     return packRgb(r, g, bb)
   },
+}
+
+// Clawd's look from a call's arguments: an options object, or the short
+// form's facing, stride, blink and color.
+function lookOf(facing: unknown, stride?: unknown, blink?: unknown, color?: unknown): ClawdLook {
+  if (typeof facing === 'object' && facing !== null) {
+    const o = facing as Record<string, unknown>
+    const poses: Pose[] = ['stand', 'walk', 'jump', 'sit']
+    const eyes: Eyes[] = ['open', 'closed', 'wide']
+    const strideIn = num(o.stride, -1)
+    const pose = poses.includes(o.pose as Pose) ? (o.pose as Pose) : strideIn >= 0 ? 'walk' : 'stand'
+    const lookIn = (typeof o.look === 'object' && o.look !== null ? o.look : {}) as Record<string, unknown>
+
+    return {
+      pose,
+      stride: Math.round(Math.max(0, strideIn)),
+      facing: Math.sign(num(o.facing)),
+      eyes: eyes.includes(o.eyes as Eyes) ? (o.eyes as Eyes) : 'open',
+      look: { x: num(lookIn.x, num(o.lookX)), y: num(lookIn.y, num(o.lookY)) },
+      isBlinking: Boolean(o.blink),
+      color: colorOf(o.color, CLAWD_ORANGE),
+      eyeColor: colorOf(o.eyeColor, LOOK.eyeColor),
+      scale: clamp(Math.round(num(o.scale, 1)), 1, 4),
+    }
+  }
+  const strideIn = Math.round(num(stride, -1))
+
+  return {
+    ...LOOK,
+    pose: strideIn >= 0 ? 'walk' : 'stand',
+    stride: Math.max(0, strideIn),
+    facing: Math.sign(num(facing)),
+    isBlinking: Boolean(blink),
+    color: colorOf(color, CLAWD_ORANGE),
+  }
+}
+
+// Anchors as the code reads them: absolute pixel positions.
+function anchorsOut(a: Anchors | undefined, left: number, top: number) {
+  if (!a) return null
+  const at = (p: { x: number; y: number }) => obj({ x: left + p.x, py: top + p.y, row: Math.floor((top + p.y) / 2) })
+
+  return obj({
+    x: left,
+    py: top,
+    row: Math.floor(top / 2),
+    w: a.w,
+    h: a.h,
+    top: at(a.top),
+    left: at(a.left),
+    right: at(a.right),
+    feet: at(a.feet),
+    eyes: obj({ ...at(a.eyes), w: a.eyes.w }),
+  })
+}
+
+const meshOut = (m: Mesh) => obj({ verts: m.verts, faces: m.faces })
+
+// A mesh as the code gives it: verts flat, faces flat triangles or lists of
+// indices (polygons, fanned into triangles).
+function meshIn(raw: unknown): Mesh | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const o = raw as Record<string, unknown>
+  if (!Array.isArray(o.verts) || !Array.isArray(o.faces)) return undefined
+  const verts = o.verts.slice(0, 60_000).map(v => num(v))
+  const faces: number[] = []
+  const count = Math.floor(verts.length / 3)
+  const index = (v: unknown) => {
+    const i = Math.round(num(v, -1))
+
+    return i >= 0 && i < count ? i : -1
+  }
+  if (o.faces.every(f => Array.isArray(f))) {
+    for (const poly of o.faces.slice(0, 20_000) as unknown[][]) {
+      const ids = poly.map(index)
+      if (ids.some(i => i < 0)) continue
+      for (let i = 1; i + 1 < ids.length; i++) faces.push(ids[0]!, ids[i]!, ids[i + 1]!)
+    }
+  } else {
+    const ids = o.faces.slice(0, 60_000).map(index)
+    for (let i = 0; i + 2 < ids.length; i += 3) if (ids[i]! >= 0 && ids[i + 1]! >= 0 && ids[i + 2]! >= 0) faces.push(ids[i]!, ids[i + 1]!, ids[i + 2]!)
+  }
+
+  return { verts, faces }
 }
 
 type Bubble = { lines: string[]; x: number; y: number; wide: number; tall: number; base: Rgb; tail?: { col: number; row: number; char: string } }
@@ -505,7 +671,7 @@ function wrap(text: string, width: number) {
 }
 
 type Box = { x0: number; y0: number; x1: number; y1: number }
-type Placed = { actor: Actor; lines: string[]; x: number; y: number; width: number; alpha: number; pose?: Pose }
+type Placed = { actor: Actor; lines: string[]; x: number; y: number; width: number; alpha: number; look?: ClawdLook }
 
 // Draws one frame of a script: backdrop, swarms, actors, then speech on top,
 // with the backdrop cleared around everything that reads.
@@ -555,19 +721,22 @@ export function stage(frame: Stage): string {
       const lines = actor.frames[mod(index, actor.frames.length)] ?? []
       const width = Math.max(1, ...lines.map(line => line.trimEnd().length))
       const x = actor.x(env)
-      let pose: Pose | undefined
+      let look: ClawdLook | undefined
       if (actor.kind === 'clawd') {
-        // Clawd steps as far as it has walked, one frame each 1.25 columns, so
+        // Clawd steps as far as it has walked, one frame each 1.5 columns, so
         // its feet never slide; standing, it blinks now and then.
         const dx = x - actor.x({ ...env, t: sceneT - 0.12 })
         const isWalking = Math.abs(dx) >= 0.2
-        pose = {
-          stride: isWalking ? mod(Math.floor(x / 1.25), 4) : -1,
+        look = {
+          ...LOOK,
+          pose: isWalking ? 'walk' : 'stand',
+          stride: isWalking ? mod(Math.floor(x / 1.5), 4) : 0,
           facing: isWalking ? Math.sign(dx) : 0,
           isBlinking: !isWalking && hash(Math.floor(sceneT * 0.5), i) > 0.6 && fract(sceneT * 0.5) < 0.06,
+          color: parseHex(actor.color),
         }
       }
-      placed.push({ actor, lines, x: Math.round(x), y: Math.round(actor.y(env)), width, alpha, pose })
+      placed.push({ actor, lines, x: Math.round(x), y: Math.round(actor.y(env)), width, alpha, look })
     })
   }
 
@@ -673,26 +842,85 @@ export function stage(frame: Stage): string {
       }
     }
   }
-  // Clawd: pixels gathered into cells, top and bottom half of each.
-  const paintClawd = (x: number, y: number, pose: Pose, color: Rgb, isHidden?: (px: { x: number; y: number }) => boolean) => {
-    const halves = new Map<number, { top?: Rgb; bottom?: Rgb }>()
-    for (const px of clawdPixels(pose, color)) {
-      const col = x + px.x
-      const prow = y * 2 + px.y
-      if (col < 0 || col >= cols || prow < 0 || prow >= rows * 2) continue
-      if (isHidden?.(px)) continue
-      const key = Math.floor(prow / 2) * cols + col
-      const cell = halves.get(key) ?? {}
-      if (prow % 2 === 0) cell.top = px.c
-      else cell.bottom = px.c
-      halves.set(key, cell)
+  // One pixel, two to a cell: the cell keeps whatever its other half holds
+  // (a backdrop pixel, an earlier pixel) and shows the new one in its half.
+  const plotPixel = (col: number, py: number, color: Rgb) => {
+    const row = Math.floor(py / 2)
+    if (col < 0 || col >= cols || row < 0 || row >= rows || !shown(row)) return
+    const at = (row * cols + col) * 3
+    const ch = words[at]
+    const fg = words[at + 1]!
+    const bg = words[at + 2]!
+    let top: number | undefined
+    let bottom: number | undefined
+    if (ch === 0x2580) {
+      top = fg
+      bottom = bg === CLEAR ? undefined : bg
+    } else if (ch === 0x2584) {
+      bottom = fg
+      top = bg === CLEAR ? undefined : bg
+    } else if (ch === 0x2588) {
+      top = bottom = fg
+    } else if (ch === 0x20 && bg !== CLEAR) {
+      top = bottom = bg
     }
-    for (const [key, cell] of halves) {
-      const col = key % cols
-      const row = Math.floor(key / cols)
-      if (cell.top) put(col, row, '▀', cell.top, cell.bottom)
-      else if (cell.bottom) put(col, row, '▄', cell.bottom)
+    if (py % 2 === 0) top = pack(color)
+    else bottom = pack(color)
+    if (top !== undefined) {
+      words[at] = 0x2580
+      words[at + 1] = top
+      words[at + 2] = bottom ?? CLEAR
+    } else {
+      words[at] = 0x2584
+      words[at + 1] = bottom ?? CLEAR
+      words[at + 2] = CLEAR
     }
+  }
+
+  // The frame's 3D depth, made when the code first draws in 3D.
+  let depth: Float32Array | undefined
+  const depthOf = () => (depth ??= createDepth(cols, rows * 2))
+
+  // Clawd at a column and a pixel row, its pixels scaled by `scaleTo` (any
+  // factor, for a figure in the distance) and depth tested when in 3D.
+  const paintClawd = (x: number, py: number, look: ClawdLook, scaleTo = 1, atDepth?: number, isHidden?: (px: { x: number; y: number }) => boolean) => {
+    const pixels = clawdPixels(look)
+    const s = look.scale
+    if (scaleTo === 1) {
+      for (const px of pixels) {
+        if (isHidden?.(px)) continue
+        plotPixel(x + px.x, py + px.y, px.c)
+      }
+    } else {
+      // Nearest-neighbor over the sprite's box.
+      const grid = new Map<number, Rgb>()
+      for (const px of pixels) grid.set(px.y * CLAWD_W * s + px.x, px.c)
+      const w = Math.max(1, Math.round(CLAWD_W * s * scaleTo))
+      const h = Math.max(1, Math.round(CLAWD_H * s * scaleTo))
+      const z = depthOf()
+      for (let dy = 0; dy < h; dy++) {
+        for (let dx = 0; dx < w; dx++) {
+          const sx = Math.min(CLAWD_W * s - 1, Math.floor(((dx + 0.5) / w) * CLAWD_W * s))
+          const sy = Math.min(CLAWD_H * s - 1, Math.floor(((dy + 0.5) / h) * CLAWD_H * s))
+          const c = grid.get(sy * CLAWD_W * s + sx)
+          if (!c) continue
+          const col = x + dx
+          const prow = py + dy
+          if (atDepth !== undefined) {
+            if (col < 0 || col >= cols || prow < 0 || prow >= rows * 2) continue
+            const at = prow * cols + col
+            if (atDepth >= z[at]!) continue
+            z[at] = atDepth
+          }
+          plotPixel(col, prow, c)
+        }
+      }
+    }
+    const a = clawdAnchors(look)
+    if (scaleTo === 1) return a
+    const k = (p: { x: number; y: number }) => ({ x: Math.round(p.x * scaleTo), y: Math.round(p.y * scaleTo) })
+
+    return { w: Math.round(a.w * scaleTo), h: Math.round(a.h * scaleTo), top: k(a.top), left: k(a.left), right: k(a.right), feet: k(a.feet), eyes: { ...k(a.eyes), w: Math.round(a.eyes.w * scaleTo) } }
   }
 
   // The scene's code draws over the backdrop and swarms, under the actors.
@@ -701,10 +929,29 @@ export function stage(frame: Stage): string {
     const dt = code.isStarted ? clamp(sceneT - code.lastT, 0, 0.25) : 0
     code.lastT = sceneT
     const globals = { t: sceneT, dt, w: cols, h: rows }
+    let scene3d: { target: Target; view: View; light: Light; fog: Fog } | undefined
     canvas = {
+      cols,
+      rows,
+      code,
       put: (col, row, char, color, back) => put(col, row, char, color, back),
       clear: (col, row) => clear({ x0: col, y0: row, x1: col, y1: row }),
-      clawd: (x, y, pose, color) => paintClawd(x, y, pose, color),
+      pixel: (col, py, color) => plotPixel(col, py, color),
+      clawd: (x, py, look, scaleTo, atDepth) => paintClawd(x, py, look, scaleTo, atDepth),
+      target3d: () => {
+        if (!scene3d) {
+          const z = depthOf()
+          scene3d = {
+            target: { w: cols, h: rows * 2, depth: z, plot: (x, y, c) => plotPixel(x, y, c) },
+            view: resolve(code.cam ?? DEFAULT_CAMERA, cols, rows * 2),
+            light: code.light ?? DEFAULT_LIGHT,
+            fog: code.fog ?? DEFAULT_FOG,
+          }
+        }
+
+        return scene3d
+      },
+      triangles: 0,
       say: (text, x, y, color) => {
         // A new line types out; one that only changed from a line already
         // typed (a live count, a timer) shows whole rather than restarting.
@@ -735,8 +982,8 @@ export function stage(frame: Stage): string {
   // Actors back to front, each hiding what is behind its outline.
   placed.forEach((one, i) => {
     const color = parseHex(one.actor.color)
-    if (one.pose) {
-      paintClawd(one.x, one.y, one.pose, color, px => one.alpha < 1 && hash(px.x * 13 + px.y, Math.floor(since / 50) + i) > one.alpha)
+    if (one.look) {
+      paintClawd(one.x, one.y * 2, one.look, 1, undefined, px => one.alpha < 1 && hash(px.x * 13 + px.y, Math.floor(since / 50) + i) > one.alpha)
 
       return
     }

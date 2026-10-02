@@ -113,8 +113,18 @@ limits the cartoons take up.
   every frame, and state persists between frames. It draws with `put`, `text`,
   `sprite`, `fill`, `line`, `circle` and `disc` in any foreground and
   background color, `clawd()` for the mascot and `say()` for a speech bubble.
-  That is what makes physics, simulations, shaders, morphs and 3D wireframes
-  possible.
+  That is what makes physics, simulations, shaders and morphs possible.
+- **Pixels:** cells hold two pixels each (upper and lower half blocks), and
+  code can draw on that finer grid with `pixel()` and `pixels()` (pixel art
+  with a palette). Clawd is drawn on the same grid, with poses, a walk cycle,
+  eye states, any color and up to 4x scale, and `clawd()` returns anchor
+  points (head, sides, feet, eyes) so a scene can put a hat on it or a prop in
+  its hand.
+- **3D:** a small renderer (`hooks/render3d.ts`) with a camera, a directional
+  light, distance fog and a depth buffer. Code builds boxes, spheres,
+  cylinders, cones, planes or its own meshes and draws them flat-shaded or as
+  wireframes; `clawd3d()` stands Clawd at a world point, sized by distance,
+  and `project()` maps a world point to the strip for labels and bubbles.
 - **Sandbox:** plugins have no `eval`, and the code comes from a model reading
   your repo, so it runs in the interpreter alone: it can reach nothing but its
   own values and the drawing calls. Every step burns fuel (1M for setup, 150k
@@ -138,6 +148,8 @@ limits the cartoons take up.
 - `hooks/script.ts`: the scene renderer, the expression interpreter and the
   drawing calls scene code uses.
 - `hooks/lang.ts`: the scene-code interpreter.
+- `hooks/clawd.ts`: the mascot's pixel art, poses and anchors.
+- `hooks/render3d.ts`: the 3D renderer.
 - `hooks/effects.ts`: the backdrop effects.
 
 ## Development

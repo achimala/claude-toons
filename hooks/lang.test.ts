@@ -94,3 +94,68 @@ test('colors must be 3 or 6 hex digits', () => {
   const script = cleanScript({ background: { effect: 'rain', palette: ['#abcd', '#123', '#456789'], speed: 1, intensity: 0 }, actors: [], particles: [] })
   expect(script?.background.palette).toEqual(['#123', '#456789'])
 })
+
+const colorAt = (words: Uint32Array, cols: number, x: number, y: number) => words[(y * cols + x) * 3 + 1]
+const backAt = (words: Uint32Array, cols: number, x: number, y: number) => words[(y * cols + x) * 3 + 2]
+
+test('pixels share a cell: two pixels in one cell become a half block with two colors', () => {
+  const script = cleanScript({ ...SCENE, code: 'function frame() { pixel(0, 0, "#ff0000"); pixel(0, 1, "#0000ff"); pixel(1, 1, "#00ff00"); text(2, 0, "A", "#fff"); pixel(2, 1, "#00ff00") }' })
+  const words = decode(script ? stage({ cols: 4, rows: 1, t: 0, script, since: 100, reveal: 1 }) : '')
+  expect(charAt(words, 4, 0, 0)).toBe('▀')
+  expect(colorAt(words, 4, 0, 0)).toBe(0xff0000)
+  expect(backAt(words, 4, 0, 0)).toBe(0x0000ff)
+  expect(charAt(words, 4, 1, 0)).toBe('▄')
+  expect(colorAt(words, 4, 1, 0)).toBe(0x00ff00)
+  // A pixel over text replaces the text in that cell.
+  expect(charAt(words, 4, 2, 0)).toBe('▄')
+})
+
+test('clawd takes options, returns anchors, and wears what is drawn at them', () => {
+  const script = cleanScript({
+    ...SCENE,
+    code: 'let c\nfunction frame() { c = clawd(10, 2, {scale: 2, color: "#00ff00", eyes: "wide", pose: "sit"}); pixels(c.top.x - 1, c.top.py - 1, "###", {"#": "#ffff00"}); text(0, 0, `${c.w} ${c.h} ${c.feet.py - c.py}`, "#fff") }',
+  })
+  const words = decode(script ? stage({ cols: 60, rows: 9, t: 0, script, since: 100, reveal: 1 }) : '')
+  expect(script?.code?.error).toBeUndefined()
+  const row = (y: number) => Array.from({ length: 60 }, (_, x) => charAt(words, 60, x, y)).join('')
+  expect(row(0)).toContain('28 16 16')
+  // The crown's yellow sits just above the green head.
+  const rowsWith = (color: number) =>
+    Array.from({ length: 9 }, (_, y) => y).filter(y => Array.from({ length: 60 }, (_, x) => colorAt(words, 60, x, y) === color || backAt(words, 60, x, y) === color).some(Boolean))
+  const crown = rowsWith(0xffff00)
+  const body = rowsWith(0x00ff00)
+  expect(crown.length).toBe(1)
+  expect(body.length).toBeGreaterThan(4)
+  expect(crown[0]).toBe(Math.min(...body) - 1)
+})
+
+test('a 3D box shades, projects, and hides what is behind it', () => {
+  const script = cleanScript({
+    ...SCENE,
+    code: [
+      'const cube = box(2, 2, 2)',
+      'function frame() {',
+      '  mesh3d(cube, {y: 1, color: "#ffffff"})',
+      '  mesh3d(box(2, 2, 2), {y: 1, z: -6, color: "#ff0000"})',
+      '  const p = project(0, 1, 0)',
+      '  const far = clawd3d(0, 0, -30, {size: 1})',
+      '  const behind = clawd3d(0, 0, 20)',
+      '  text(0, 0, `${p.x} ${p.y} ${Math.round(p.depth)} ${far ? far.h : "-"} ${behind === null}`, "#fff")',
+      '}',
+    ].join('\n'),
+  })
+  const words = decode(script ? stage({ cols: 120, rows: 9, t: 0, script, since: 100, reveal: 1 }) : '')
+  expect(script?.code?.error).toBeUndefined()
+  const row = (y: number) => Array.from({ length: 120 }, (_, x) => charAt(words, 120, x, y)).join('')
+  // The origin lands mid-strip, a little over 9 units away; a far Clawd is a few pixels tall.
+  expect(row(0)).toMatch(/^60 [45] 9 [2-4] true/)
+  // The near cube covers the middle; its faces are shades of the same white, never red.
+  let lit = 0
+  for (let y = 2; y < 8; y++) {
+    const c = colorAt(words, 120, 60, y) ?? 0
+    const r = (c >> 16) & 255
+    const g = (c >> 8) & 255
+    if (c !== 0x01000000 && r === g && r > 40) lit += 1
+  }
+  expect(lit).toBeGreaterThan(2)
+})

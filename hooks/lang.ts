@@ -612,7 +612,7 @@ type Eval = (s: Scope) => V
 type Signal = undefined | 'break' | 'continue' | { value: V }
 type Exec = (s: Scope) => Signal
 
-const obj = (entries: Record<string, V> = {}) => Object.assign(Object.create(null) as Record<string, V>, entries)
+export const obj = (entries: Record<string, V> = {}) => Object.assign(Object.create(null) as Record<string, V>, entries)
 const isObj = (v: V): v is Record<string, V> => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.getPrototypeOf(v) === null
 const describe = (v: V) => (v === null ? 'null' : v === undefined ? 'undefined' : typeof v === 'string' ? `"${v.slice(0, 20)}"` : Array.isArray(v) ? 'an array' : typeof v)
 
