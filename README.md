@@ -59,10 +59,11 @@ appear while Claude is working, and only in the terminal.
   `/toons on` and `/toons off` set it outright. The choice is remembered
   across sessions. While hidden, no scenes are requested, so they cost nothing.
 - `/toons settings` opens a pane to pick the director model, whether it
-  thinks before each scene, which styles the scenes are drawn in (a mix, 3D,
-  pixel art or text art only, or everything but 3D), and how often a new scene
-  is requested, with an estimate of what that costs. The same settings are
-  also in `/config`.
+  thinks before each scene, whether ready-made scenes are dealt for routine
+  work (on by default; see below), which styles the scenes are drawn in (a
+  mix, 3D, pixel art or text art only, or everything but 3D), and how often a
+  new scene is requested, with an estimate of what that costs. The same
+  settings are also in `/config`.
 
 ## What it costs
 
@@ -73,7 +74,18 @@ runs on an API key, it is billed to that key. If the session's login can't make
 the requests, the cartoons switch off for the session. They never fall back to
 another key from your environment.
 
-Rough API-price estimates for an hour of Claude working continuously:
+By default most scenes come from a stock of ready-made ones that ship with
+the plugin, dealt for free: one for each kind of thing Claude does (thinking,
+searching, reading, editing, running tests, building, git, the web, waiting
+on subagents, writing the reply), labeled with the file or command at hand.
+The director is asked only when something happens worth a scene of its own
+(the task, a failure, the end of the turn, a scene whose code broke), and no
+more than once a minute. That keeps the cost to a fraction of the figures
+below: typically a dollar an hour or less on Sonnet. With "ready-made scenes"
+off, every scene is the director's:
+
+Rough API-price estimates for an hour of Claude working continuously with
+ready-made scenes off:
 
 | New scene | Haiku 4.5 | Sonnet 5.5 (default) | Opus 5.5 |
 |---|---|---|---|
@@ -103,6 +115,13 @@ toward the same limits, each in proportion to its cost.
 - **Watching:** a `tool.call` hook logs each tool Claude runs (command, file,
   pattern, and whether it failed); `prompt.submit` and `turn.complete` mark
   the turn's edges.
+- **Stock:** with ready-made scenes on (the default), the log is read for
+  what Claude is doing (`hooks/library.ts`) and routine news deals a scene
+  from the stock (`hooks/scenes.ts`) for that phase, a new one when the
+  phase changes or after 45 seconds, with `{what}` in it filled by the file
+  or command at hand. The director is asked only for news worth it, at most
+  once a minute. `bun scripts/library.ts` fills the stock through the Codex
+  CLI, checking that every scene it keeps draws for minutes without error.
 - **Directing:** whenever there is news, the log goes to the director model in one
   conversation for the session, so each request reads the earlier ones from the
   prompt cache. The conversation is cut back periodically so a long session
@@ -162,6 +181,9 @@ toward the same limits, each in proportion to its cost.
   `/toons` command and settings pane.
 - `hooks/cost.ts`: prices, cost estimates and how they are described.
 - `hooks/narrator.ts`: the conversation with the model and its prompt.
+- `hooks/library.ts`: reading the log for what Claude is doing, and dealing
+  stock scenes; `hooks/scenes.ts` is the stock, written by
+  `scripts/library.ts`.
 - `hooks/script.ts`: the scene renderer, the expression interpreter and the
   drawing calls scene code uses.
 - `hooks/lang.ts`: the scene-code interpreter.

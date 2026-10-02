@@ -12,7 +12,7 @@ import { cleanScript, type Script } from './script'
 // as Claude Code's own requests do.
 const IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
-const SYSTEM = `You direct a tiny animated cartoon that plays inside Claude Code's spinner. Claude Code is a terminal app where Claude, an AI coding agent, works on a developer's code. While Claude works, a strip of the terminal under the "thinking" spinner is yours: 9 rows tall and as wide as the terminal. Every few seconds you get a log of what Claude just did and answer with a new scene for the developer to watch while they wait.
+export const SYSTEM = `You direct a tiny animated cartoon that plays inside Claude Code's spinner. Claude Code is a terminal app where Claude, an AI coding agent, works on a developer's code. While Claude works, a strip of the terminal under the "thinking" spinner is yours: 9 rows tall and as wide as the terminal. Every few seconds you get a log of what Claude just did and answer with a new scene for the developer to watch while they wait.
 
 Each user message starts with the strip's size, "[strip 120x9]" (columns x rows), then the log of what happened since your last scene, each line stamped with seconds since the task began:
 - "[task] ..." is what the developer asked for.
@@ -141,7 +141,7 @@ Keep it charming, take creative risks, and make every scene look different from 
 
 // Settings dealt one per new scene, so a run of similar work (a dozen reads in
 // a bug hunt) still plays out across very different worlds.
-const WORLDS = [
+export const WORLDS = [
   'deep sea', 'outer space', 'wild west', 'medieval castle', 'jungle safari', 'cooking show',
   'bank heist', 'sports broadcast', 'film noir city at night', 'fairy tale forest', 'weather report',
   'nature documentary', 'cyberpunk street', 'circus', 'haunted house', 'pirate ship', 'farm',
@@ -188,7 +188,7 @@ const BATCH = 6
 // A line of the log that only says something is still going.
 const isQuiet = (line: string) => /^\+\d+s still /.test(line)
 
-const SCHEMA = {
+export const SCHEMA = {
   type: 'object',
   properties: {
     concept: { type: 'string' },

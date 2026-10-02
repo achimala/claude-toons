@@ -1,0 +1,89 @@
+// A library of ready-made scenes, one for each kind of thing Claude does,
+// dealt for free while the work is routine, so the director is asked only
+// when something worth a new picture happens.
+
+import { SCENES, type Stock } from './scenes'
+
+export const PHASES = ['thinking', 'searching', 'reading', 'editing', 'testing', 'building', 'running', 'git', 'web', 'agents', 'writing'] as const
+export type Phase = (typeof PHASES)[number]
+export const isPhase = (v: unknown): v is Phase => PHASES.includes(v as Phase)
+
+// What a scene of each phase is about, for whoever generates one.
+export const ABOUT: Record<Phase, string> = {
+  thinking: 'Claude is thinking: working out what to do next, weighing options, puzzling over a problem',
+  searching: 'Claude is searching the codebase: grepping for a pattern, globbing for files, hunting for where something is defined',
+  reading: 'Claude is reading code: going through files to understand how they work',
+  editing: 'Claude is editing code: writing and changing files, making the fix',
+  testing: 'Claude is running the tests and waiting to see if they pass',
+  building: 'Claude is building or installing: a compile, a bundle, a package install that takes a while',
+  running: 'Claude is running a command in the shell and waiting for it',
+  git: 'Claude is working with git: committing, branching, looking at history or a diff',
+  web: 'Claude is fetching a web page or searching the web for an answer',
+  agents: 'Claude has sent out subagents to work on parts of the task in parallel and is waiting for them',
+  writing: 'Claude is writing its reply to the developer, the work done',
+}
+
+// The phase a line of the log belongs to, if it names one: a tool starting,
+// or the spinner turning to thinking or writing.
+export function phaseOf(line: string): Phase | undefined {
+  if (/\[Claude is thinking\]/.test(line)) return 'thinking'
+  if (/\[Claude is writing the reply\]/.test(line)) return 'writing'
+  const m = /-> started (\w+)(?: `([^`]*)`)?/.exec(line)
+  if (!m) return undefined
+  const tool = m[1] ?? ''
+  const args = m[2] ?? ''
+  if (/^(Read|NotebookRead)$/.test(tool)) return 'reading'
+  if (/^(Grep|Glob|LS|Explore)$/.test(tool)) return 'searching'
+  if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(tool)) return 'editing'
+  if (/^(WebFetch|WebSearch)$/.test(tool) || /^mcp__/.test(tool)) return 'web'
+  if (/^(Agent|Task|Workflow)$/.test(tool)) return 'agents'
+  if (tool === 'Bash') {
+    if (/\b(test|tests|jest|vitest|pytest|mocha|spec|rspec|go test|cargo test)\b/.test(args)) return 'testing'
+    if (/\b(build|tsc|make|cargo (build|check)|compile|webpack|vite|bundle|install|npm ci|yarn|pnpm|pip|poetry|gradle|mvn|xcodebuild)\b/.test(args)) return 'building'
+    if (/\b(git|gh)\b/.test(args)) return 'git'
+
+    return 'running'
+  }
+
+  return undefined
+}
+
+// Whether a line of the log is news worth a scene of its own from the
+// director: the task, a failure, the end of the turn, a scene that broke.
+export const isInteresting = (line: string) => /^\[task\] |^\+\d+s <- (failed|denied)|^\[turn finished\]|^\[your last scene's code/.test(line)
+
+// The thing Claude last touched, short enough to label a prop: a file's
+// name, or the head of a command.
+export function whatOf(line: string): string | undefined {
+  const m = /-> started \w+ `([^`|]*)/.exec(line)
+  if (!m) return undefined
+  const arg = m[1]?.trim() ?? ''
+  if (!arg) return undefined
+  const name = /^[\w./-]+$/.test(arg) && arg.includes('/') ? arg.slice(arg.lastIndexOf('/') + 1) : arg.split(' ').slice(0, 2).join(' ')
+
+  return name.replace(/["\\]/g, '').slice(0, 20) || undefined
+}
+
+// A scene from the stock for a phase, as the raw object the director would
+// have answered, with "{what}" in it filled in; none of the recent concepts,
+// if it can be helped. Nothing when the stock has none for the phase.
+export function deal(phase: Phase, recent: string[], what: string | undefined, random: () => number = Math.random): { concept: string; raw: unknown } | undefined {
+  const mine = SCENES.filter(s => s.phase === phase)
+  if (mine.length === 0) return undefined
+  const fresh = mine.filter(s => !recent.includes(s.concept))
+  const pick = (fresh.length > 0 ? fresh : mine)[Math.floor(random() * (fresh.length > 0 ? fresh : mine).length)] as Stock
+  const filled = JSON.stringify(pick.scene).split('{what}').join(JSON.stringify(what ?? 'the code').slice(1, -1))
+
+  return { concept: pick.concept, raw: JSON.parse(filled) }
+}
+
+// The brief a generator adds to the director's prompt for one stock scene.
+export function brief(phase: Phase, world: string, style: string, cols: number) {
+  return [
+    `[strip ${cols}x9]`,
+    `[task] (unknown: this is a ready-made scene)`,
+    `This scene goes into a library of ready-made scenes, dealt whenever ${ABOUT[phase]}. No more news will come while it plays, for a minute or two, so it has to tell its own story: something happens, and keeps happening, in this world, about this kind of work. Clawd has a voice here; what it says and when is yours. The real file or command is not known: write {what} wherever a label or a line would name it, and it is filled in when the scene is dealt (up to 20 characters).`,
+    `[world: ${world}]`,
+    `[style: ${style}]`,
+  ].join('\n')
+}

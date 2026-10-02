@@ -19,6 +19,7 @@ import {
   type Stats,
   type Window,
 } from './cost'
+import { deal, isInteresting, phaseOf, whatOf, type Phase } from './library'
 import { STYLE_SETS, URL, createThread, isStyleSet, type Narration, type StyleSet } from './narrator'
 import { cleanScript, stage, type Script } from './script'
 
@@ -32,6 +33,13 @@ const QUIET_MS = 20_000
 // scene animates on its own, so until then quiet costs nothing: no request
 // is made just to hear that the scene should keep playing.
 const BEAT_MS = 90_000
+// With the stock of ready-made scenes on, the director is asked only for news
+// worth a scene of its own (the task, a failure, the turn's end, a broken
+// scene), and no more often than this; everything else deals a stock scene.
+const LIVE_MS = 60_000
+// How long a scene plays before routine news in the same phase deals the
+// next stock scene.
+const STOCK_MS = 45_000
 // The settings pane, and the slash command that toggles the cartoons or opens it.
 const PANE = 'toons'
 const COMMAND = 'toons'
@@ -97,6 +105,17 @@ type Buddy = {
   sceneAt: number
   previous?: Script
   previousAt: number
+  // Whether stock scenes are dealt, what Claude is doing by the log and the
+  // thing it last touched (to label a stock scene), the phase the scene
+  // playing was dealt for, when the director was last asked, the concepts
+  // of recent stock scenes, and how many were dealt this session.
+  isStock: boolean
+  doing: Phase
+  what?: string
+  scenePhase?: Phase
+  liveAt: number
+  stockRecent: string[]
+  sessionStock: number
   // The spinner being drawn on, its width, when it showed, and the rows the
   // band was last drawn with.
   spinner?: string
@@ -131,8 +150,13 @@ type Buddy = {
   accruedAt: number
 }
 
-function createBuddy(model: Model, pace: Pace, isThinking: boolean, styles: StyleSet): Buddy {
+function createBuddy(model: Model, pace: Pace, isThinking: boolean, styles: StyleSet, isStock: boolean): Buddy {
   return {
+    isStock,
+    doing: 'thinking',
+    liveAt: 0,
+    stockRecent: [],
+    sessionStock: 0,
     model,
     pace,
     thread: createThread(model, { isThinking, styles }),
@@ -194,6 +218,34 @@ function note(b: Buddy, at: number, line: string) {
   if (!b.isShown) return
   b.pending.push(`${stamp(b, at)} ${line}`)
   b.loggedAt = at
+  const doing = phaseOf(line)
+  if (doing) b.doing = doing
+  const what = whatOf(line)
+  if (what) b.what = what
+}
+
+// The scene playing gives way to another.
+function show(b: Buddy, script: Script, at: number) {
+  b.previous = b.scene
+  b.previousAt = b.sceneAt
+  b.scene = script
+  b.sceneAt = at
+  b.scenePhase = b.doing
+  b.error = undefined
+}
+
+// A stock scene for what Claude is doing, if there is one it can draw.
+function dealStock(b: Buddy, at: number) {
+  const got = deal(b.doing, b.stockRecent, b.what)
+  const script = got && cleanScript(got.raw)
+  if (!got || !script) return false
+  // A stock scene that breaks is not the director's to fix.
+  if (script.code) script.code.isReported = true
+  b.stockRecent = [...b.stockRecent, got.concept].slice(-8)
+  b.sessionStock += 1
+  show(b, script, at)
+
+  return true
 }
 
 const bucket = (b: Buddy) => (b.stats.buddy[spendKey(b.model, b.pace)] ??= { usd: 0, scenes: 0, activeMs: 0 })
@@ -258,7 +310,10 @@ function ask($: EngineInterface, b: Buddy) {
       if (b.pending.length === 0 && now - b.loggedAt >= quiet && now - b.lastCall >= quiet) {
         const oldest = [...b.running.values()].sort((x, y) => x.at - y.at)[0]
         if (!isSpent) b.loggedAt = now
-        else if (oldest) note(b, now, `still running ${oldest.what} (${Math.round((now - oldest.at) / 1000)}s so far)`)
+        else if (b.isStock && !b.scene.code?.error && dealStock(b, now)) {
+          b.loggedAt = now
+          $.ui.invalidate('ui.render')
+        } else if (oldest) note(b, now, `still running ${oldest.what} (${Math.round((now - oldest.at) / 1000)}s so far)`)
         else if (b.phase) note(b, now, `still ${b.phase} (${Math.round((now - b.phaseAt) / 1000)}s so far)`)
         else b.loggedAt = now
       }
@@ -266,6 +321,20 @@ function ask($: EngineInterface, b: Buddy) {
         b.lastCall = now
         // A scene whose code broke is news for the narrator, once.
         const broken = b.scene.code?.error && !b.scene.code.isReported ? b.scene.code : undefined
+        // With the stock on, routine news deals a stock scene when what
+        // Claude is doing has changed or the scene has played a while, and
+        // the log waits for the director's next turn: news worth it, once
+        // LIVE_MS have passed since its last scene.
+        const isNews = Boolean(broken) || b.pending.some(isInteresting)
+        if (b.isStock && !(isNews && now - b.liveAt >= LIVE_MS)) {
+          const isStale = b.doing !== b.scenePhase || now - b.sceneAt >= STOCK_MS || Boolean(b.scene.code?.error)
+          if (isStale && dealStock(b, now)) $.ui.invalidate('ui.render')
+          // The log keeps its task line and its latest lines.
+          if (b.pending.length > 60) b.pending = [...b.pending.filter(line => line.startsWith('[task] ')).slice(-1), ...b.pending.slice(-50)]
+          await $.clock.sleep(400)
+          continue
+        }
+        b.liveAt = now
         if (broken) {
           broken.isReported = true
           b.lastTrouble = broken.error
@@ -288,11 +357,7 @@ function ask($: EngineInterface, b: Buddy) {
           await $.store.set('stats', b.stats).catch(() => {})
         }
         if (told.script) {
-          b.previous = b.scene
-          b.previousAt = b.sceneAt
-          b.scene = told.script
-          b.sceneAt = await $.clock.now()
-          b.error = undefined
+          show(b, told.script, await $.clock.now())
         } else {
           if (told.error && told.error !== b.error) $.ui.toast(`toons: ${told.error}`)
           b.error = told.error
@@ -377,6 +442,7 @@ export const register: Register = (on, options) => {
     isPace(settings.pace) ? settings.pace : 'every 15 seconds',
     settings.thinking === 'on',
     isStyleSet(settings.styles) ? settings.styles : 'mix',
+    settings.library !== 'off',
   )
 
   on('session.start', async ($, e, next) => {
@@ -528,6 +594,13 @@ export const register: Register = (on, options) => {
           onSelect={(value: string) => void setOption($, 'thinking', value)}
         />
         <Select
+          key="library"
+          label="Ready-made scenes "
+          options={[{ value: 'on', label: 'on (cheaper: the director is asked only for news)' }, { value: 'off' }]}
+          value={b.isStock ? 'on' : 'off'}
+          onSelect={(value: string) => void setOption($, 'library', value)}
+        />
+        <Select
           key="styles"
           label="Scene styles      "
           options={Object.keys(STYLE_SETS).map(value => ({ value, label: value === 'mix' ? 'mix (3D, pixel art, text art)' : value }))}
@@ -567,7 +640,7 @@ export const register: Register = (on, options) => {
 
         {heading('Usage')}
         {cost.windows.length > 0 && row('Your plan', cost.windows.map(w => `${w.label} ${w.percent}%`).join(' · '))}
-        {row('This session', `${b.sessionScenes} scenes · ${money(b.sessionUsd)}`)}
+        {row('This session', `${b.sessionScenes} scenes · ${money(b.sessionUsd)}`, b.sessionStock > 0 ? `and ${b.sessionStock} ready-made, free` : undefined)}
         {b.lastTrouble && row('Last scene error', b.lastTrouble.slice(0, 70), 'sent back to the director to fix')}
 
         <Box marginTop={1}>

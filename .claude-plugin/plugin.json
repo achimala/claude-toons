@@ -26,6 +26,13 @@
       "default": "off",
       "options": ["off", "on"]
     },
+    "library": {
+      "type": "string",
+      "title": "Toons: ready-made scenes",
+      "description": "Deal ready-made scenes for routine work (reading, searching, tests running...) and ask the director only when something happens: the task, a failure, the end of the turn. Much cheaper; off asks the director for every scene.",
+      "default": "on",
+      "options": ["on", "off"]
+    },
     "pace": {
       "type": "string",
       "title": "Toons: new scene",
