@@ -1,11 +1,11 @@
-// A small 3D renderer for scene code, done the way terminal 3D is usually
-// done: the world is sampled at a finer grid than the cells (2 across and 4
-// down per cell, so the samples are square), each sample is lit with a
-// smoothly interpolated normal, and each cell is then drawn as the glyph
-// whose density matches the brightness its samples average to, in the
-// surface's color. Edges come out anti-aliased, since a half-covered cell
-// gets a lighter glyph, and shading reads through both the glyph ramp and
-// the color.
+// A small 3D renderer for scene code. The world is sampled at a finer grid
+// than the cells (2 across and 4 down per cell, so the samples are square),
+// each sample is lit with a smoothly interpolated normal, and each cell is
+// then drawn from its samples: a cell a surface covers whole is a solid cell
+// in the lit color, a cell covered in part is the block glyph that matches
+// which quarters are covered (so edges come out anti-aliased), and a mesh
+// drawn `ascii` is instead the glyph whose density matches its brightness,
+// the classic terminal look, which suits curved things.
 
 import type { Rgb } from './effects'
 
@@ -27,7 +27,7 @@ export type Transform = {
   scale: Vec3
 }
 
-export type Style = { color: Rgb; wire: boolean; unlit: boolean }
+export type Style = { color: Rgb; wire: boolean; unlit: boolean; ascii?: boolean }
 
 export const DEFAULT_CAMERA: Camera = { eye: [0, 2.5, 9], target: [0, 1, 0], fov: 90 }
 export const DEFAULT_LIGHT: Light = { dir: [0.4, 1, 0.6], ambient: 0.25 }
@@ -83,6 +83,8 @@ export const createFrame = (cols: number, rows: number): Frame => {
 
 const SURFACE = 1
 const SPRITE = 2
+const ASCII = 3
+const isSurface = (owner: number) => owner === SURFACE || owner === ASCII
 
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
@@ -253,10 +255,10 @@ const fogged = (c: Rgb, fog: Fog, depth: number): Rgb => {
   return [c[0] + (fog.color[0] - c[0]) * k, c[1] + (fog.color[1] - c[1]) * k, c[2] + (fog.color[2] - c[2]) * k]
 }
 
-function plot(frame: Frame, x: number, y: number, depth: number, c: Rgb) {
+function plot(frame: Frame, x: number, y: number, depth: number, c: Rgb, owner = SURFACE) {
   const at = y * frame.w + x
   frame.depth[at] = depth
-  frame.owner[at] = SURFACE
+  frame.owner[at] = owner
   frame.color[at * 3] = c[0]
   frame.color[at * 3 + 1] = c[1]
   frame.color[at * 3 + 2] = c[2]
@@ -323,7 +325,7 @@ function fillTriangle(frame: Frame, view: View, fog: Fog, l: Vec3, ambient: numb
         ]
         color = lit(color, n, p, view, l, ambient)
       }
-      plot(frame, x, y, depth, fogged(color, fog, depth))
+      plot(frame, x, y, depth, fogged(color, fog, depth), style.ascii ? ASCII : SURFACE)
     }
   }
 }
@@ -430,12 +432,14 @@ export function claimPixel(frame: Frame, col: number, py: number, depth: number)
 
 // ---------------------------------------------------------------- glyphs
 
-// Glyphs by brightness, sparse to dense.
+// Glyphs by brightness, sparse to dense, for `ascii` meshes.
 const RAMP = [...' .,:;-=+*#%@']
 
-// Draws the cells drawn on since the last composite: each as the glyph for
-// its samples' brightness (coverage counts, so edges thin out), colored
-// like its surface, over a dark tint of that color where it is solid.
+// The block glyph for each set of covered quarters: bit 1 top-left, 2
+// top-right, 4 bottom-left, 8 bottom-right.
+const QUARTERS = [' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█']
+
+// Draws the cells drawn on since the last composite.
 export function composite(frame: Frame, put: (col: number, row: number, char: string, color: Rgb, back?: Rgb) => void) {
   const per = SX * SY
   for (let row = 0; row < frame.rows; row++) {
@@ -445,14 +449,18 @@ export function composite(frame: Frame, put: (col: number, row: number, char: st
       frame.dirty[cell] = 0
       let covered = 0
       let sprite = 0
+      let ascii = 0
+      let quarters = 0
       const sum: Rgb = [0, 0, 0]
       for (let dy = 0; dy < SY; dy++) {
         for (let dx = 0; dx < SX; dx++) {
           const at = (row * SY + dy) * frame.w + col * SX + dx
-          const owner = frame.owner[at]
+          const owner = frame.owner[at]!
           if (owner === SPRITE) sprite += 1
-          if (owner !== SURFACE) continue
+          if (!isSurface(owner)) continue
+          if (owner === ASCII) ascii += 1
           covered += 1
+          quarters |= 1 << ((dy < SY / 2 ? 0 : 2) + (dx < SX / 2 ? 0 : 1))
           sum[0] += frame.color[at * 3]!
           sum[1] += frame.color[at * 3 + 1]!
           sum[2] += frame.color[at * 3 + 2]!
@@ -461,17 +469,23 @@ export function composite(frame: Frame, put: (col: number, row: number, char: st
       // A cell a sprite holds is the sprite's.
       if (covered === 0 || sprite > 0) continue
       const mean: Rgb = [sum[0] / covered, sum[1] / covered, sum[2] / covered]
-      const brightness = (0.299 * mean[0] + 0.587 * mean[1] + 0.114 * mean[2]) / 255
       const coverage = covered / per
-      // The glyph: brightness thinned by coverage. The ink keeps the surface
-      // hue at a floor so dark surfaces still read; the ground a dark tint.
-      // Mid-tones lean toward the denser glyphs (a gamma of 0.6), since on a
-      // dark terminal a surface half as bright still wants to read as solid.
-      const level = Math.min(RAMP.length - 1, Math.round(Math.pow(brightness, 0.6) * coverage * (RAMP.length - 1)))
-      const char = RAMP[Math.max(1, level)] ?? '.'
-      const ink = lift(mean)
-      const back: Rgb | undefined = coverage >= 0.5 ? [mean[0] * 0.18, mean[1] * 0.18, mean[2] * 0.18] : undefined
-      put(col, row, char, ink, back)
+      if (ascii > 0) {
+        // The classic look: a glyph as dense as the brightness, thinned by
+        // coverage, in ink that keeps the hue, over a dark tint when solid.
+        // Mid-tones lean toward the denser glyphs (a gamma of 0.6).
+        const brightness = (0.299 * mean[0] + 0.587 * mean[1] + 0.114 * mean[2]) / 255
+        const level = Math.min(RAMP.length - 1, Math.round(Math.pow(brightness, 0.6) * coverage * (RAMP.length - 1)))
+        const back: Rgb | undefined = coverage >= 0.5 ? [mean[0] * 0.18, mean[1] * 0.18, mean[2] * 0.18] : undefined
+        put(col, row, RAMP[Math.max(1, level)] ?? '.', lift(mean), back)
+      } else if (coverage >= 0.75) {
+        // Solid: the lit color fills the cell.
+        put(col, row, ' ', mean, mean)
+      } else {
+        // An edge: the block glyph for the covered quarters, the rest left to
+        // whatever is behind.
+        put(col, row, QUARTERS[quarters] ?? '█', mean)
+      }
     }
   }
 }

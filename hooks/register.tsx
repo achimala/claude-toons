@@ -116,6 +116,8 @@ type Buddy = {
   sessionScenes: number
   isSubscription: boolean
   windows: Window[]
+  // The last scene code error reported to the narrator, for the settings pane.
+  lastTrouble?: string
   // The turn's start and the session's cost then, and when working time with
   // the cartoons showing was last added up.
   turnAt: number
@@ -249,7 +251,10 @@ function ask($: EngineInterface, b: Buddy) {
         b.lastCall = now
         // A scene whose code broke is news for the narrator, once.
         const broken = b.scene.code?.error && !b.scene.code.isReported ? b.scene.code : undefined
-        if (broken) broken.isReported = true
+        if (broken) {
+          broken.isReported = true
+          b.lastTrouble = broken.error
+        }
         const activity = [...(broken ? [`[your last scene's code stopped: ${broken.error?.slice(0, 200)}]`] : []), ...b.pending].join('\n')
         b.pending = []
         b.thread.ask(`[strip ${b.cols}x${ROWS}]\n${activity}`)
@@ -515,6 +520,7 @@ export const register: Register = (on, options) => {
         {heading('Usage')}
         {cost.windows.length > 0 && row('Your plan', cost.windows.map(w => `${w.label} ${w.percent}%`).join(' · '))}
         {row('This session', `${b.sessionScenes} scenes · ${money(b.sessionUsd)}`)}
+        {b.lastTrouble && row('Last scene error', b.lastTrouble.slice(0, 70), 'sent back to the director to fix')}
 
         <Box marginTop={1}>
           <Text dimColor>

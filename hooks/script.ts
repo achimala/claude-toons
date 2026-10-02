@@ -17,7 +17,7 @@ import {
   type Background,
   type Rgb,
 } from './effects'
-import { CLAWD_H, CLAWD_ORANGE, CLAWD_W, LOOK, clawdAnchors, clawdPixels, type Anchors, type ClawdLook, type Eyes, type Pose } from './clawd'
+import { ARMS, CLAWD_H, CLAWD_ORANGE, CLAWD_W, LOOK, clawdAnchors, clawdPixels, type Anchors, type Arm, type ClawdLook, type Eyes, type Pose } from './clawd'
 import { obj, parseProgram, type Program } from './lang'
 import {
   DEFAULT_CAMERA,
@@ -450,7 +450,7 @@ const API = {
       scale: [sc[0] ?? 1, sc[1] ?? 1, sc[2] ?? 1],
     }
     const { frame, view, light, fog } = canvas.scene3d()
-    drawMesh(frame, view, light, fog, m, t, { color: colorOf(o.color), wire: Boolean(o.wire), unlit: Boolean(o.unlit) })
+    drawMesh(frame, view, light, fog, m, t, { color: colorOf(o.color), wire: Boolean(o.wire), unlit: Boolean(o.unlit), ascii: Boolean(o.ascii) })
   },
   line3d: (x0: unknown, y0: unknown, z0: unknown, x1: unknown, y1: unknown, z1: unknown, color?: unknown) => {
     if (!canvas) return
@@ -484,8 +484,10 @@ const API = {
     if (!p) return null
     const o = (typeof options === 'object' && options !== null ? options : {}) as Record<string, unknown>
     const look = lookOf(o)
-    // Its height in pixel rows (two samples each), from its height in units.
-    const pixelsTall = (num(o.size, 1) * view.f) / p.depth / (SY / 2)
+    // Its height in pixel rows (two samples each), from its height in units,
+    // never more than most of the strip: Clawd is small in a big world.
+    const most = canvas.rows * 2 * 0.7
+    const pixelsTall = Math.min(most, (num(o.size, 0.9) * view.f) / p.depth / (SY / 2))
     const s = Math.max(0.15, Math.min(6, pixelsTall / CLAWD_H))
     const w = Math.round(CLAWD_W * s)
     const h = Math.round(CLAWD_H * s)
@@ -530,9 +532,17 @@ function lookOf(facing: unknown, stride?: unknown, blink?: unknown, color?: unkn
     const strideIn = num(o.stride, -1)
     const pose = poses.includes(o.pose as Pose) ? (o.pose as Pose) : strideIn >= 0 ? 'walk' : 'stand'
     const lookIn = (typeof o.look === 'object' && o.look !== null ? o.look : {}) as Record<string, unknown>
+    // arms: one pose for both, or {left, right}.
+    const armOf = (v: unknown, fallback: Arm): Arm => (ARMS.includes(v as Arm) ? (v as Arm) : fallback)
+    const armsIn = o.arms
+    const arms =
+      typeof armsIn === 'object' && armsIn !== null
+        ? { left: armOf((armsIn as Record<string, unknown>).left, 'up'), right: armOf((armsIn as Record<string, unknown>).right, 'up') }
+        : { left: armOf(armsIn, 'up'), right: armOf(armsIn, 'up') }
 
     return {
       pose,
+      arms,
       stride: Math.round(Math.max(0, strideIn)),
       facing: Math.sign(num(o.facing)),
       eyes: eyes.includes(o.eyes as Eyes) ? (o.eyes as Eyes) : 'open',
@@ -679,7 +689,12 @@ type Placed = { actor: Actor; lines: string[]; x: number; y: number; width: numb
 // Draws one frame of a script: backdrop, swarms, actors, then speech on top,
 // with the backdrop cleared around everything that reads.
 export function stage(frame: Stage): string {
-  const { cols, rows, t, script, previous, since, reveal } = frame
+  const { cols, rows, t, since, reveal } = frame
+  // A scene whose code broke with nothing else to show keeps the last scene
+  // on until the narrator's fixed one arrives.
+  const isBlank = (s: Script) => Boolean(s.code?.error) && s.actors.length === 0 && s.swarms.length === 0
+  const script = isBlank(frame.script) && frame.previous && !isBlank(frame.previous) ? frame.previous : frame.script
+  const previous = script === frame.script ? frame.previous : undefined
   const words = new Uint32Array(cols * rows * 3)
   paintBackground(words, {
     cols,
@@ -775,9 +790,11 @@ export function stage(frame: Stage): string {
 
       return part
     })
-    // The text plus a border and a space of padding either side.
+    // The text plus a border and a space of padding either side. A bubble
+    // the strip cannot hold whole (while the band grows in) waits.
     const wide = Math.max(...all.map(line => line.length)) + 4
     const tall = all.length + 2
+    if (tall > rows || wide > cols) continue
     const bottom = rows - 1
     // Every spot near the speaker, scored by how many sprite cells it would
     // cover and how far it strays; the last spot keeps its place unless a
@@ -1015,10 +1032,35 @@ export function stage(frame: Stage): string {
   })
   // Speech on top of everything: a rounded box in the speaker's color, filled
   // with a dark tint of it so nothing behind shows through the words.
+  // What a cell shows before a bubble goes over it: its background, a block
+  // glyph's color, or nothing (the terminal's own).
+  const unpack = (c: number): Rgb => [(c >> 16) & 255, (c >> 8) & 255, c & 255]
+  const underlying = (col: number, row: number): Rgb | undefined => {
+    if (col < 0 || col >= cols || row < 0 || row >= rows) return undefined
+    const at = (row * cols + col) * 3
+    const ch = words[at]
+    const fg = words[at + 1]!
+    const bg = words[at + 2]!
+    if (bg !== CLEAR && ch === 0x20) return unpack(bg)
+    const isBlock = ch === 0x2580 || ch === 0x2584 || ch === 0x2588
+    if (isBlock && fg !== CLEAR) return bg !== CLEAR ? mix(unpack(fg), unpack(bg), 0.5) : unpack(fg)
+    if (bg !== CLEAR) return unpack(bg)
+
+    return undefined
+  }
   for (const b of bubbles) {
+    // Whole, never cut by the strip's edges.
+    b.y = clamp(b.y, 0, Math.max(0, rows - b.tall))
+    b.x = clamp(b.x, 0, Math.max(0, cols - b.wide))
     const edge = mix(b.base, [255, 255, 255], 0.35)
-    const fill = dim(b.base, 0.18)
     const ink = mix(b.base, [255, 255, 255], 0.85)
+    // The panel is see-through: over something it is that, darkened and
+    // tinted; over nothing it is a dark tint of the speaker's color.
+    const panel = (col: number, row: number): Rgb => {
+      const under = underlying(col, row)
+
+      return under ? mix(dim(under, 0.3), dim(b.base, 0.18), 0.35) : dim(b.base, 0.18)
+    }
     const right = b.x + b.wide - 1
     const bottomRow = b.y + b.tall - 1
     for (let row = b.y; row <= bottomRow; row++) {
@@ -1030,12 +1072,11 @@ export function stage(frame: Stage): string {
         const char =
           isTop && isLeft ? '╭' : isTop && isRight ? '╮' : isBottom && isLeft ? '╰' : isBottom && isRight ? '╯'
           : isTop || isBottom ? '─' : isLeft || isRight ? '│' : ' '
-        if (char === ' ') put(col, row, ' ', ink, fill)
-        else put(col, row, char, edge)
+        put(col, row, char, char === ' ' ? ink : edge, panel(col, row))
       }
     }
-    if (b.tail) put(b.tail.col, b.tail.row, b.tail.char, edge)
-    b.lines.forEach((line, dy) => [...line].forEach((c, dx) => put(b.x + 2 + dx, b.y + 1 + dy, c, ink, fill)))
+    if (b.tail) put(b.tail.col, b.tail.row, b.tail.char, edge, panel(b.tail.col, b.tail.row))
+    b.lines.forEach((line, dy) => [...line].forEach((c, dx) => put(b.x + 2 + dx, b.y + 1 + dy, c, ink, panel(b.x + 2 + dx, b.y + 1 + dy))))
   }
 
   return encode(words)

@@ -9,16 +9,28 @@ import type { Rgb } from './effects'
 export const CLAWD_W = 14
 export const CLAWD_H = 8
 
-// The body: B is the body, E an eye (its resting place, 1 wide and 2 tall),
-// A a claw raised at the side, as the mascot holds them.
+// The body: B is the body, E an eye (its resting place, 1 wide and 2 tall).
+// The claws are drawn per pose beside it.
 const BODY = [
   '..BBBBBBBBBB..',
-  'A.BBBBBBBBBB.A',
-  'ABBBEBBBBBEBBA',
+  '..BBBBBBBBBB..',
+  '.BBBEBBBBBEBB.',
   '.BBBEBBBBBEBB.',
   '.BBBBBBBBBBBB.',
   '..BBBBBBBBBB..',
 ]
+
+export type Arm = 'up' | 'out' | 'down'
+export const ARMS: Arm[] = ['up', 'out', 'down']
+
+// A claw's pixels for each pose, for the left side (x from the body's left
+// edge at 1, so 0 is just outside it); the right side mirrors them. Each
+// ends at its tip, where things are held.
+const CLAWS: Record<Arm, { pixels: [number, number][]; tip: [number, number] }> = {
+  up: { pixels: [[0, 1], [0, 2]], tip: [0, 0] },
+  out: { pixels: [[-1, 2], [0, 2]], tip: [-2, 2] },
+  down: { pixels: [[0, 3], [0, 4]], tip: [0, 5] },
+}
 const BODY_H = BODY.length
 // The feet: two pairs under the body, each foot a pixel wide and two tall.
 const FEET = [3, 5, 8, 10]
@@ -47,6 +59,8 @@ export type ClawdLook = {
   eyeColor: Rgb
   // Whole pixels per pixel: 1 is 14x8, 2 is 28x16.
   scale: number
+  // Where each claw is held.
+  arms: { left: Arm; right: Arm }
 }
 
 export const LOOK: ClawdLook = {
@@ -59,6 +73,7 @@ export const LOOK: ClawdLook = {
   color: CLAWD_ORANGE,
   eyeColor: EYE_DARK,
   scale: 1,
+  arms: { left: 'up', right: 'up' },
 }
 
 export type Pixel = { x: number; y: number; c: Rgb }
@@ -85,6 +100,8 @@ function pixelsAtOne(look: ClawdLook): Pixel[] {
   BODY.forEach((row, y) => {
     for (let x = 0; x < row.length; x++) if (row[x] !== '.') body.push({ x, y: y + drop, c: look.color })
   })
+  for (const [px, py] of CLAWS[look.arms.left].pixels) body.push({ x: px, y: py + drop, c: look.color })
+  for (const [px, py] of CLAWS[look.arms.right].pixels) body.push({ x: CLAWD_W - 1 - px, y: py + drop, c: look.color })
   const ex = Math.max(-1, Math.min(1, Math.round(look.look.x))) || look.facing
   const ey = Math.max(-1, Math.min(1, Math.round(look.look.y)))
   for (const x0 of EYES) {
@@ -123,7 +140,8 @@ function pixelsAtOne(look: ClawdLook): Pixel[] {
       for (let y = top; y <= (isLifted ? ground - 1 : ground); y++) feet.push({ x, y, c: look.color })
     })
   }
-  const inside = (p: Pixel) => p.x >= 0 && p.x < CLAWD_W && p.y >= 0 && p.y < CLAWD_H
+  // A claw held out reaches a pixel past the box on either side.
+  const inside = (p: Pixel) => p.x >= -1 && p.x <= CLAWD_W && p.y >= 0 && p.y < CLAWD_H
 
   return [...body, ...feet, ...eyes].filter(inside)
 }
@@ -145,15 +163,16 @@ export function clawdPixels(look: ClawdLook): Pixel[] {
 export function clawdAnchors(look: ClawdLook): Anchors {
   const s = Math.max(1, Math.min(4, Math.round(look.scale)))
   const drop = look.pose === 'sit' ? CLAWD_H - BODY_H : 0
-  // The claws: just outside each, level with the raised tip.
-  const claw = (1 + drop) * s
+  // The claws' tips, where things are held.
+  const leftTip = CLAWS[look.arms.left].tip
+  const rightTip = CLAWS[look.arms.right].tip
 
   return {
     w: CLAWD_W * s,
     h: CLAWD_H * s,
     top: { x: Math.floor((CLAWD_W / 2) * s), y: drop * s - 1 },
-    left: { x: -1, y: claw },
-    right: { x: CLAWD_W * s, y: claw },
+    left: { x: leftTip[0] * s - (s - 1), y: (leftTip[1] + drop) * s },
+    right: { x: (CLAWD_W - 1 - rightTip[0]) * s + (s - 1), y: (rightTip[1] + drop) * s },
     feet: { x: Math.floor((CLAWD_W / 2) * s), y: CLAWD_H * s },
     eyes: { x: EYES[0]! * s, y: (EYE_ROW + drop) * s, w: (EYES[1]! - EYES[0]! + 1) * s },
   }
