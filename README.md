@@ -1,4 +1,4 @@
-# spinner-buddy
+# claude-toons
 
 A Claude Code plugin that draws a little animated cartoon of what Claude is
 doing, right under the "thinking" spinner, while it works. Clawd, the Claude
@@ -6,21 +6,26 @@ Code mascot, stars in every scene: running tests becomes a castle siege, a bug
 hunt becomes a safari, a long build becomes a rocket on the pad. A separate
 Claude model watches the tool calls and directs a new scene every few seconds.
 
+An independent project, not affiliated with or endorsed by Anthropic.
+
 ## Install
 
+The plugin is named `toons` inside Claude Code (so `/toons`, and "Toons" in
+`/config`); `claude-toons` is the repository.
+
 You need the Claude Code CLI with plugin hook modules available. They are an
-early-access feature; spinner-buddy was built on version 2.1.287.
+early-access feature; claude-toons was built on version 2.1.287.
 
 1. Clone the repo:
 
    ```sh
-   git clone https://github.com/<owner>/spinner-buddy ~/src/spinner-buddy
+   git clone https://github.com/achimala/claude-toons ~/src/claude-toons
    ```
 
 2. Try it for one session:
 
    ```sh
-   claude --plugin-dir ~/src/spinner-buddy
+   claude --plugin-dir ~/src/claude-toons
    ```
 
    Give Claude any task; the cartoons appear under the spinner while it works.
@@ -31,7 +36,7 @@ early-access feature; spinner-buddy was built on version 2.1.287.
    ```json
    {
      "env": {
-       "CLAUDE_CODE_PLUGIN_DIRS": "/Users/you/src/spinner-buddy"
+       "CLAUDE_CODE_PLUGIN_DIRS": "/Users/you/src/claude-toons"
      }
    }
    ```
@@ -43,17 +48,17 @@ To update, `git pull` in the folder; a running session reloads the plugin when
 its files change. To uninstall, remove the folder from
 `CLAUDE_CODE_PLUGIN_DIRS` (or stop passing `--plugin-dir`) and delete it.
 
-**Nothing shows up?** Run `claude --debug` and look for a `spinner-buddy` line.
+**Nothing shows up?** Run `claude --debug` and look for a `toons` line.
 A line saying hook modules are turned off means your Claude Code doesn't have
 the feature enabled yet; any other line names what went wrong. Cartoons only
 appear while Claude is working, and only in the terminal.
 
 ## Controls
 
-- `/cartoons` shows or hides the cartoons, even while Claude is working.
-  `/cartoons on` and `/cartoons off` set it outright. The choice is remembered
+- `/toons` shows or hides the cartoons, even while Claude is working.
+  `/toons on` and `/toons off` set it outright. The choice is remembered
   across sessions. While hidden, no scenes are requested, so they cost nothing.
-- `/cartoons settings` opens a pane to pick the director model and how often a
+- `/toons settings` opens a pane to pick the director model and how often a
   new scene is requested, with an estimate of what that costs. The same two
   settings are also in `/config`.
 
@@ -83,7 +88,7 @@ answers faster and so draws more scenes an hour; at a fixed pace it is half
 the price.
 
 Nothing is spent while Claude is idle or the cartoons are hidden.
-`/cartoons settings` replaces these estimates with what you have actually
+`/toons settings` replaces these estimates with what you have actually
 spent, once there is enough of it. It also compares that with what Claude's
 own work costs, which is the clearest guide to how much of a subscription's
 limits the cartoons take up.
@@ -127,7 +132,7 @@ limits the cartoons take up.
 ## Files
 
 - `hooks/register.tsx`: the hooks: watching, asking for scenes, drawing, the
-  `/cartoons` command and settings pane.
+  `/toons` command and settings pane.
 - `hooks/cost.ts`: prices, cost estimates and how they are described.
 - `hooks/narrator.ts`: the conversation with the model and its prompt.
 - `hooks/script.ts`: the scene renderer, the expression interpreter and the

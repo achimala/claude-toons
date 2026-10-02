@@ -1,5 +1,5 @@
 {
-  "name": "spinner-buddy",
+  "name": "toons",
   "version": "0.1.0",
   "description": "Animated cartoons of what Claude is doing, drawn under the spinner while it works",
   "author": { "name": "Anshu Chimala" },
@@ -7,14 +7,14 @@
   "userConfig": {
     "model": {
       "type": "string",
-      "title": "Spinner buddy: director model",
-      "description": "The model that watches Claude work and directs the cartoons. Haiku is cheapest; Opus is the most inventive. /cartoons settings shows what each costs.",
+      "title": "Toons: director model",
+      "description": "The model that watches Claude work and directs the cartoons. Haiku is cheapest; Opus is the most inventive. /toons settings shows what each costs.",
       "default": "claude-sonnet-5-5",
       "options": ["claude-haiku-4-5", "claude-sonnet-5-5", "claude-opus-5-5"]
     },
     "pace": {
       "type": "string",
-      "title": "Spinner buddy: new scene",
+      "title": "Toons: new scene",
       "description": "How often a new scene is requested while Claude works. Slower is cheaper; each scene keeps animating until the next arrives.",
       "default": "every 15 seconds",
       "options": ["as fast as possible", "every 15 seconds", "every 30 seconds", "every minute"]

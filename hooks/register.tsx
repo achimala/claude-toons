@@ -22,15 +22,15 @@ import {
 import { URL, createThread, type Narration } from './narrator'
 import { cleanScript, stage, type Script } from './script'
 
-const PLUGIN = 'spinner-buddy'
+const PLUGIN = 'toons'
 const ROWS = 9
 // How long the band takes to rise to its full height when the spinner shows.
 const GROW_MS = 700
 // How long the log may stay quiet mid-turn before a "still going" line.
 const QUIET_MS = 10_000
 // The settings pane, and the slash command that toggles the cartoons or opens it.
-const PANE = 'spinner-buddy'
-const COMMAND = 'cartoons'
+const PANE = 'toons'
+const COMMAND = 'toons'
 
 // The buddy waking up, until its first scene arrives.
 const FIRST = cleanScript({
@@ -270,7 +270,7 @@ function ask($: EngineInterface, b: Buddy) {
           b.sceneAt = await $.clock.now()
           b.error = undefined
         } else {
-          if (told.error && told.error !== b.error) $.ui.toast(`spinner buddy: ${told.error}`)
+          if (told.error && told.error !== b.error) $.ui.toast(`toons: ${told.error}`)
           b.error = told.error
         }
         $.ui.invalidate('ui.render')
@@ -315,7 +315,7 @@ async function setOption($: EngineInterface, field: string, value: string) {
   const rows = await $.config.list()
   const row = rows.find(r => r.key.startsWith(PLUGIN) && r.key.endsWith(`.${field}`))
   const { deny } = await $.config.set({ key: row?.key ?? `${PLUGIN}.${field}`, value })
-  if (deny) $.ui.toast(`spinner buddy: could not change ${field}: ${deny}`)
+  if (deny) $.ui.toast(`toons: could not change ${field}: ${deny}`)
 }
 
 // Paints the scene at about 20 frames a second while the spinner shows, each
@@ -348,7 +348,7 @@ export const register: Register = (on, options) => {
     b.stats = cleanStats(await $.store.get('stats'))
     await $.command.register({
       name: COMMAND,
-      description: 'Show or hide the spinner cartoons; "/cartoons settings" for the model, pace and cost',
+      description: 'Show or hide the cartoons under the spinner; "/toons settings" for the model, pace and cost',
       argumentHint: '[on|off|settings]',
       immediate: true,
     })
@@ -359,16 +359,16 @@ export const register: Register = (on, options) => {
   on('command.run', { command: COMMAND }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'settings') {
-      await $.ui.open({ id: PANE, title: 'Spinner buddy', focus: true, closeOnEscape: true, rows: 22 })
+      await $.ui.open({ id: PANE, title: 'Toons', focus: true, closeOnEscape: true, rows: 22 })
 
-      return { text: 'Spinner buddy settings opened.' }
+      return { text: 'Toons settings opened.' }
     }
     await toggle($, b, arg === 'on' ? true : arg === 'off' ? false : !b.isShown)
 
     return {
       text: b.isShown
-        ? `Cartoons on (${MODEL_NAMES[b.model]}, a new scene ${b.pace}). /cartoons settings shows what they cost.`
-        : 'Cartoons off: no scenes are requested or drawn until you turn them back on with /cartoons.',
+        ? `Cartoons on (${MODEL_NAMES[b.model]}, a new scene ${b.pace}). /toons settings shows what they cost.`
+        : 'Cartoons off: no scenes are requested or drawn until you turn them back on with /toons.',
     }
   })
 
@@ -480,7 +480,7 @@ export const register: Register = (on, options) => {
           value={b.pace}
           onSelect={(value: string) => void setOption($, 'pace', value)}
         />
-        <Text dimColor>Toggle any time with /cartoons, even while Claude works</Text>
+        <Text dimColor>Toggle any time with /toons, even while Claude works</Text>
 
         {heading('Per hour of Claude working')}
         {row(
