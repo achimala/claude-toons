@@ -92,9 +92,9 @@ the price.
 
 Nothing is spent while Claude is idle or the cartoons are hidden.
 `/toons settings` replaces these estimates with what you have actually
-spent, once there is enough of it. It also compares that with what Claude's
-own work costs, which is the clearest guide to how much of a subscription's
-limits the cartoons take up.
+spent, once there is enough of it, and puts it beside what Claude's own work
+costs per hour, so the two read in the same unit: on a subscription both count
+toward the same limits, each in proportion to its cost.
 
 ## How it works
 

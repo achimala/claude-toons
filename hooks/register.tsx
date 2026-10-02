@@ -500,21 +500,20 @@ export const register: Register = (on, options) => {
         <Text dimColor>Toggle any time with /toons, even while Claude works</Text>
 
         {heading('Per hour of Claude working')}
+        {cost.claude ? row("Claude's own work", `~${money(cost.claude.usd)}`, 'measured') : row("Claude's own work", 'not measured yet', 'after ~10 min of Claude working')}
         {row(
-          'Cost',
+          'Cartoons',
           `~${money(cost.hour.usd)}`,
-          cost.hour.measuredMinutes !== undefined ? `measured over ${cost.hour.measuredMinutes} min` : 'estimate',
+          `~${Math.round(cost.hour.scenes)} scenes, ${cost.hour.measuredMinutes !== undefined ? `measured over ${cost.hour.measuredMinutes} min` : 'estimate'}`,
         )}
-        {row('Scenes', `~${Math.round(cost.hour.scenes)}`)}
+        {cost.claude &&
+          row('One scene', money(cost.hour.usd / Math.max(1, cost.hour.scenes)), `costs about ${cost.claude.sceneSeconds < 1 ? 'a second' : `${Math.round(cost.claude.sceneSeconds)} seconds`} of Claude's own work`)}
         {cost.perScene &&
           row(
             'Per scene',
             money(cost.perScene.usd),
             `${Math.round(cost.perScene.outputShare * 100)}% is the scene itself (~${Math.round(cost.perScene.output)} tokens); the rest is the cached history (~${Math.round(cost.perScene.cacheRead / 1000)}k tokens, mostly cache reads)`,
           )}
-        {cost.vsClaude
-          ? row('vs. Claude itself', `+${cost.vsClaude.percent}% usage`, `like ${cost.vsClaude.minutes} more min of Claude working`)
-          : row('vs. Claude itself', 'not measured yet', 'after ~10 min of Claude working')}
 
         {heading('Each model at this pace')}
         {cost.models.map(m => (
@@ -537,7 +536,7 @@ export const register: Register = (on, options) => {
         <Box marginTop={1}>
           <Text dimColor>
             {b.isSubscription
-              ? "On a subscription this isn't charged separately: it counts toward your plan's usage limits."
+              ? "On a subscription neither line is charged separately: both count toward the same usage limits, each in proportion to its cost."
               : "Billed to this session's API key."}{' '}
             Hidden or idle: nothing.
           </Text>

@@ -32,8 +32,10 @@ test("the cost is put against Claude's own work and the plan", () => {
   const cost = summarizeCost({ stats, model: 'claude-sonnet-5-5', pace: 'every 15 seconds', windows: [{ kind: 'five_hour', percentUsed: 34 }, { kind: 'spend_limit', percentUsed: 5 }] })
   expect(money(cost.hour.usd)).toBe('$3.00')
   expect(cost.hour.measuredMinutes).toBe(60)
-  expect(cost.vsClaude).toEqual({ claudeUsd: 20, percent: 15, minutes: 9 })
+  // 240 scenes for $3 against $20 an hour: one scene is 2.25 seconds of Claude.
+  expect(cost.claude?.usd).toBe(20)
+  expect(cents(cost.claude?.sceneSeconds ?? 0)).toBe(2.25)
   expect(cost.models.map(m => m.name)).toEqual(['Haiku 4.5', 'Sonnet 5.5', 'Opus 5.5'])
   expect(cost.windows).toEqual([{ label: '5-hour', percent: 34 }])
-  expect(summarizeCost({ stats: emptyStats(), model: 'claude-haiku-4-5', pace: 'every minute', windows: [] }).vsClaude).toBeUndefined()
+  expect(summarizeCost({ stats: emptyStats(), model: 'claude-haiku-4-5', pace: 'every minute', windows: [] }).claude).toBeUndefined()
 })

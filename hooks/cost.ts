@@ -94,9 +94,9 @@ export type Window = { kind: string; percentUsed: number }
 export type CostSummary = {
   // An hour of Claude working with the cartoons on, at this model and pace.
   hour: { usd: number; scenes: number; measuredMinutes?: number }
-  // The same hour against Claude's own work, once that has been measured:
-  // the share it adds, and the minutes of Claude's own work it equals.
-  vsClaude?: { claudeUsd: number; percent: number; minutes: number }
+  // Claude's own work, once measured: what an hour of it costs, and how many
+  // seconds of it cost as much as one scene, so the two read in one unit.
+  claude?: { usd: number; sceneSeconds: number }
   // What a scene spends, from the tokens measured so far at this model (any
   // pace), with the share of its cost that is the scene itself (output).
   perScene?: { usd: number; output: number; cacheRead: number; outputShare: number }
@@ -134,9 +134,9 @@ export function summarizeCost(args: { stats: Stats; model: Model; pace: Pace; wi
       scenes >= 5
         ? { usd: usd / scenes, output: tokens.output / scenes, cacheRead: tokens.cacheRead / scenes, outputShare: usd > 0 ? outputUsd / usd : 0 }
         : undefined,
-    vsClaude:
+    claude:
       claudeUsd && share !== undefined
-        ? { claudeUsd, percent: Math.max(1, Math.round(share * 100)), minutes: Math.max(1, Math.round(share * 60)) }
+        ? { usd: claudeUsd, sceneSeconds: (hour.usd / Math.max(1, hour.scenes)) / (claudeUsd / 3600) }
         : undefined,
     models: MODELS.map(m => ({ model: m, name: MODEL_NAMES[m], usd: estimate(stats, m, pace).usd, scenes: estimate(stats, m, pace).scenes })),
     windows: windows
