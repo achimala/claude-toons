@@ -23,9 +23,12 @@ import {
   DEFAULT_CAMERA,
   DEFAULT_FOG,
   DEFAULT_LIGHT,
-  MOST_TRIANGLES,
+  SX,
+  SY,
   box,
-  createDepth,
+  claimPixel,
+  composite,
+  createFrame,
   cylinder,
   drawLine,
   drawMesh,
@@ -36,11 +39,10 @@ import {
   sphere,
   type Camera,
   type Fog,
+  type Frame,
   type Light,
   type Mesh,
-  type Target,
   type Transform,
-  type Vec3,
   type View,
 } from './render3d'
 
@@ -316,9 +318,8 @@ type Canvas = {
   // Clawd with its top-left at a column and a pixel row; where things attach.
   clawd: (x: number, py: number, look: ClawdLook, scaleTo?: number, depth?: number) => Anchors
   say: (text: string, x: number, y: number, color: Rgb) => void
-  // The frame's 3D target, made on first use.
-  target3d: () => { target: Target; view: View; light: Light; fog: Fog }
-  triangles: number
+  // The frame's 3D world, made on first use.
+  scene3d: () => { frame: Frame; view: View; light: Light; fog: Fog }
 }
 let canvas: Canvas | undefined
 
@@ -448,27 +449,29 @@ const API = {
       rot: [num(o.rx), num(o.ry), num(o.rz)],
       scale: [sc[0] ?? 1, sc[1] ?? 1, sc[2] ?? 1],
     }
-    const { target, view, light, fog } = canvas.target3d()
-    canvas.triangles += drawMesh(target, view, light, fog, m, t, { color: colorOf(o.color), wire: Boolean(o.wire), unlit: Boolean(o.unlit) }, MOST_TRIANGLES - canvas.triangles)
+    const { frame, view, light, fog } = canvas.scene3d()
+    drawMesh(frame, view, light, fog, m, t, { color: colorOf(o.color), wire: Boolean(o.wire), unlit: Boolean(o.unlit) })
   },
   line3d: (x0: unknown, y0: unknown, z0: unknown, x1: unknown, y1: unknown, z1: unknown, color?: unknown) => {
     if (!canvas) return
-    const { target, view, fog } = canvas.target3d()
-    drawLine(target, view, fog, [num(x0), num(y0), num(z0)], [num(x1), num(y1), num(z1)], colorOf(color))
+    const { frame, view, fog } = canvas.scene3d()
+    drawLine(frame, view, fog, [num(x0), num(y0), num(z0)], [num(x1), num(y1), num(z1)], colorOf(color))
   },
   point3d: (x: unknown, y: unknown, z: unknown, color?: unknown) => {
     if (!canvas) return
-    const { target, view, fog } = canvas.target3d()
-    drawPoint(target, view, fog, [num(x), num(y), num(z)], colorOf(color))
+    const { frame, view, fog } = canvas.scene3d()
+    drawPoint(frame, view, fog, [num(x), num(y), num(z)], colorOf(color))
   },
   // Where a world point lands: x and y in cells, px and py in pixels, its
   // depth, and the pixels one world unit covers there; null behind the camera.
   project: (x: unknown, y: unknown, z: unknown) => {
     if (!canvas) return null
-    const { view } = canvas.target3d()
+    const { view } = canvas.scene3d()
     const p = project(view, [num(x), num(y), num(z)])
 
-    return p ? obj({ x: Math.round(p.x), y: Math.round(p.y / 2), px: Math.round(p.x), py: Math.round(p.y), depth: p.depth, scale: view.f / p.depth }) : null
+    return p
+      ? obj({ x: Math.round(p.x / SX), y: Math.round(p.y / SY), px: Math.round(p.x / SX), py: Math.round(p.y / (SY / 2)), depth: p.depth, scale: view.f / p.depth / SX })
+      : null
   },
   // Clawd standing at a world point (its feet there), facing the camera,
   // sized by distance: `size` is its height in world units (1 by default).
@@ -476,19 +479,19 @@ const API = {
   // when it is behind the camera.
   clawd3d: (x: unknown, y: unknown, z: unknown, options?: unknown) => {
     if (!canvas) return null
-    const { view, target } = canvas.target3d()
+    const { view } = canvas.scene3d()
     const p = project(view, [num(x), num(y), num(z)])
     if (!p) return null
     const o = (typeof options === 'object' && options !== null ? options : {}) as Record<string, unknown>
     const look = lookOf(o)
-    const pixelsTall = (num(o.size, 1) * view.f) / p.depth
+    // Its height in pixel rows (two samples each), from its height in units.
+    const pixelsTall = (num(o.size, 1) * view.f) / p.depth / (SY / 2)
     const s = Math.max(0.15, Math.min(6, pixelsTall / CLAWD_H))
     const w = Math.round(CLAWD_W * s)
     const h = Math.round(CLAWD_H * s)
-    const left = Math.round(p.x - w / 2)
-    const top = Math.round(p.y - h)
+    const left = Math.round(p.x / SX - w / 2)
+    const top = Math.round(p.y / (SY / 2) - h)
     const anchors = canvas.clawd(left, top, look, s, p.depth)
-    void target
 
     return anchorsOut(anchors, left, top)
   },
@@ -877,9 +880,13 @@ export function stage(frame: Stage): string {
     }
   }
 
-  // The frame's 3D depth, made when the code first draws in 3D.
-  let depth: Float32Array | undefined
-  const depthOf = () => (depth ??= createDepth(cols, rows * 2))
+  // The frame's 3D samples, made when the code first draws in 3D, and drawn
+  // as glyphs before any 2D drawing that follows, so that sits on top.
+  let frame3d: Frame | undefined
+  const frameOf = () => (frame3d ??= createFrame(cols, rows))
+  const flush3d = () => {
+    if (frame3d) composite(frame3d, put)
+  }
 
   // Clawd at a column and a pixel row, its pixels scaled by `scaleTo` (any
   // factor, for a figure in the distance) and depth tested when in 3D.
@@ -897,7 +904,6 @@ export function stage(frame: Stage): string {
       for (const px of pixels) grid.set(px.y * CLAWD_W * s + px.x, px.c)
       const w = Math.max(1, Math.round(CLAWD_W * s * scaleTo))
       const h = Math.max(1, Math.round(CLAWD_H * s * scaleTo))
-      const z = depthOf()
       for (let dy = 0; dy < h; dy++) {
         for (let dx = 0; dx < w; dx++) {
           const sx = Math.min(CLAWD_W * s - 1, Math.floor(((dx + 0.5) / w) * CLAWD_W * s))
@@ -906,12 +912,7 @@ export function stage(frame: Stage): string {
           if (!c) continue
           const col = x + dx
           const prow = py + dy
-          if (atDepth !== undefined) {
-            if (col < 0 || col >= cols || prow < 0 || prow >= rows * 2) continue
-            const at = prow * cols + col
-            if (atDepth >= z[at]!) continue
-            z[at] = atDepth
-          }
+          if (atDepth !== undefined && !claimPixel(frameOf(), col, prow, atDepth)) continue
           plotPixel(col, prow, c)
         }
       }
@@ -929,21 +930,33 @@ export function stage(frame: Stage): string {
     const dt = code.isStarted ? clamp(sceneT - code.lastT, 0, 0.25) : 0
     code.lastT = sceneT
     const globals = { t: sceneT, dt, w: cols, h: rows }
-    let scene3d: { target: Target; view: View; light: Light; fog: Fog } | undefined
+    let scene3d: { frame: Frame; view: View; light: Light; fog: Fog } | undefined
     canvas = {
       cols,
       rows,
       code,
-      put: (col, row, char, color, back) => put(col, row, char, color, back),
-      clear: (col, row) => clear({ x0: col, y0: row, x1: col, y1: row }),
-      pixel: (col, py, color) => plotPixel(col, py, color),
-      clawd: (x, py, look, scaleTo, atDepth) => paintClawd(x, py, look, scaleTo, atDepth),
-      target3d: () => {
+      put: (col, row, char, color, back) => {
+        flush3d()
+        put(col, row, char, color, back)
+      },
+      clear: (col, row) => {
+        flush3d()
+        clear({ x0: col, y0: row, x1: col, y1: row })
+      },
+      pixel: (col, py, color) => {
+        flush3d()
+        plotPixel(col, py, color)
+      },
+      clawd: (x, py, look, scaleTo, atDepth) => {
+        flush3d()
+
+        return paintClawd(x, py, look, scaleTo, atDepth)
+      },
+      scene3d: () => {
         if (!scene3d) {
-          const z = depthOf()
           scene3d = {
-            target: { w: cols, h: rows * 2, depth: z, plot: (x, y, c) => plotPixel(x, y, c) },
-            view: resolve(code.cam ?? DEFAULT_CAMERA, cols, rows * 2),
+            frame: frameOf(),
+            view: resolve(code.cam ?? DEFAULT_CAMERA, cols * SX, rows * SY),
             light: code.light ?? DEFAULT_LIGHT,
             fog: code.fog ?? DEFAULT_FOG,
           }
@@ -951,8 +964,8 @@ export function stage(frame: Stage): string {
 
         return scene3d
       },
-      triangles: 0,
       say: (text, x, y, color) => {
+        flush3d()
         // A new line types out; one that only changed from a line already
         // typed (a live count, a timer) shows whole rather than restarting.
         let first = code.said.get(text)
@@ -972,6 +985,7 @@ export function stage(frame: Stage): string {
         code.program.start({ ...API, ...globals }, SETUP_FUEL)
       }
       code.program.call('frame', [sceneT, dt], globals, FRAME_FUEL)
+      flush3d()
     } catch (e) {
       code.error = e instanceof Error ? e.message : String(e)
     } finally {

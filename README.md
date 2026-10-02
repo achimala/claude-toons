@@ -120,9 +120,13 @@ limits the cartoons take up.
   eye states, any color and up to 4x scale, and `clawd()` returns anchor
   points (head, sides, feet, eyes) so a scene can put a hat on it or a prop in
   its hand.
-- **3D:** a small renderer (`hooks/render3d.ts`) with a camera, a directional
-  light, distance fog and a depth buffer. Code builds boxes, spheres,
-  cylinders, cones, planes or its own meshes and draws them flat-shaded or as
+- **3D:** a small renderer (`hooks/render3d.ts`) done the way terminal 3D
+  usually is: the world is sampled at 2x4 points per cell, each sample is lit
+  with a smoothly interpolated normal (diffuse plus a highlight, with creases
+  kept sharp), and each cell becomes the glyph whose density matches its
+  brightness (`" .,:;-=+*#%@"`), in the surface's color, so edges come out
+  anti-aliased and distance fog reads as depth. Code builds boxes, spheres,
+  cylinders, cones, planes or its own meshes and draws them shaded or as
   wireframes; `clawd3d()` stands Clawd at a world point, sized by distance,
   and `project()` maps a world point to the strip for labels and bubbles.
 - **Sandbox:** plugins have no `eval`, and the code comes from a model reading

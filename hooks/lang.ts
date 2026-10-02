@@ -1292,6 +1292,12 @@ const BUILTINS: Record<string, V> = {
   isNaN: (v: V) => Number.isNaN(Number(v)),
   Infinity,
   NaN,
+  // The expression language's functions by their bare names too, since
+  // scenes mix the two freely.
+  ...Object.fromEntries(['sin', 'cos', 'tan', 'abs', 'floor', 'ceil', 'round', 'sqrt', 'pow', 'exp', 'sign', 'atan2', 'hypot'].map(name => [name, (Math as unknown as Record<string, (...a: number[]) => number>)[name]])),
+  min: (...v: number[]) => Math.min(...v),
+  max: (...v: number[]) => Math.max(...v),
+  pi: Math.PI,
   // Helpers a scene reaches for constantly.
   clamp: (v: number, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, v)),
   lerp: (a: number, b: number, k: number) => a + (b - a) * k,

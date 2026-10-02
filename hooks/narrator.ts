@@ -59,7 +59,7 @@ Drawing (x is the column, y the row, 0,0 top-left; anything off the strip is cli
 - say(text, x, y) a speech bubble pointing at x, y (Clawd's head is about x+7, y)
 - rgb(r, g, b), hsl(hue 0-360, sat 0-1, light 0-1), mix(c1, c2, k) make colors
 - clamp(v, lo, hi), lerp(a, b, k), smoothstep(a, b, v), fract(v), mod(a, b), rand(n) (a fixed random number per n), noise(x) and noise2(x, y) (smooth noise in [0,1)), and Math.random()
-3D: the strip can also be a window into a world, rendered with depth shading. camera(ex, ey, ez, tx, ty, tz, fov) sets the eye, what it looks at, and the angle it sees across (default eye 0,2.5,9 looking at 0,1,0, fov 90: at the origin that shows about 20 units across and 3 units tall, so the world is wide and low, like the strip; build things about 1 to 2 units tall and spread them left to right, and move the camera to fly, orbit or dolly). light(dx, dy, dz, ambient) is the direction toward the light; fog(near, far, color) fades things with distance (default 8 to 40 into black: that is the depth cue, keep it). Shapes: box(w, h, d) (centered), sphere(r, segments), cylinder(r, h, segments) and cone(r, h, segments) (standing on y 0), plane(w, d) (flat on the ground), or your own {verts: [x,y,z,...], faces: [[i,j,k,...], ...]}. mesh3d(mesh, {x, y, z, rx, ry, rz, scale, color, wire, unlit}) draws one, lit flat per face; wire draws its edges; unlit skips the lighting. line3d(x0,y0,z0, x1,y1,z1, color) and point3d(x, y, z, color) for rails, rain, stars. clawd3d(x, y, z, options) puts Clawd standing at a world point, sized by distance (options as clawd, plus size: its height in units, 1 by default), so it can walk down a road into the distance; it returns the same anchors, or null behind the camera. project(x, y, z) gives {x, y, px, py, depth, scale} for placing text, a bubble or 2D art at a world point. Everything 3D in a frame shares one depth buffer, so later draws go behind nearer ones. The camera, light and fog keep between frames. Good 3D scenes: a road or rails vanishing to a point with things passing, a planet with a moon orbiting, a city of boxes at night, a tunnel flying through, a chessboard, a spinning gear, a crane lifting a crate, an orbiting camera around one hero object. Keep it to a few dozen shapes; big flat-shaded shapes read better than detail at this size. Mix freely with 2D: a 3D set behind a 2D Clawd, or text labels placed with project().
+3D: the strip can also be a window into a world, drawn as shaded ASCII: surfaces are lit smoothly (diffuse plus a highlight) and each cell becomes a glyph as dense as its brightness (" .,:;-=+*#%@"), in the surface's color, with edges thinning out, so a sphere reads as a sphere and depth reads through the fog. Give surfaces mid-to-light colors (dark ones draw faint), and keep the camera and light steady or moving smoothly. camera(ex, ey, ez, tx, ty, tz, fov) sets the eye, what it looks at, and the angle it sees across (default eye 0,2.5,9 looking at 0,1,0, fov 90: at the origin that shows about 20 units across and 3 units tall, so the world is wide and low, like the strip; build things about 1 to 2 units tall and spread them left to right, and move the camera to fly, orbit or dolly). light(dx, dy, dz, ambient) is the direction toward the light; fog(near, far, color) fades things with distance (default 8 to 40 into black: that is the depth cue, keep it). Shapes: box(w, h, d) (centered), sphere(r, segments), cylinder(r, h, segments) and cone(r, h, segments) (standing on y 0), plane(w, d) (flat on the ground), or your own {verts: [x,y,z,...], faces: [[i,j,k,...], ...]}. mesh3d(mesh, {x, y, z, rx, ry, rz, scale, color, wire, unlit}) draws one, lit flat per face; wire draws its edges; unlit skips the lighting. line3d(x0,y0,z0, x1,y1,z1, color) and point3d(x, y, z, color) for rails, rain, stars. clawd3d(x, y, z, options) puts Clawd standing at a world point, sized by distance (options as clawd, plus size: its height in units, 1 by default), so it can walk down a road into the distance; it returns the same anchors, or null behind the camera. project(x, y, z) gives {x, y, px, py, depth, scale} for placing text, a bubble or 2D art at a world point. Everything 3D in a frame shares one depth buffer, so later draws go behind nearer ones. The camera, light and fog keep between frames. Good 3D scenes: a road or rails vanishing to a point with things passing, a planet with a moon orbiting, a city of boxes at night, a tunnel flying through, a chessboard, a spinning gear, a crane lifting a crate, an orbiting camera around one hero object. Keep it to a few dozen shapes; big flat-shaded shapes read better than detail at this size. Mix freely with 2D: a 3D set behind a 2D Clawd, or text labels placed with project().
 The code draws over the background effect and particles and under the actors. Keep each frame light: a few thousand steps is fine (a loop over every cell of the strip with a little math each is fine), heavy nested loops are not, and a frame that runs too long or throws stops the code for the rest of the scene. When the code draws everything, leave actors and particles empty and set the background's intensity to 0. When the code draws Clawd and its speech, do not also add a "clawd" actor. "" for no code.
 
 A code example, for the shape of it (do not copy the idea):
@@ -94,15 +94,18 @@ function frame(t, dt) {
   }
   line3d(-5, 0, 10, -5, 0, -80, "#aaa")
   line3d(5, 0, 10, 5, 0, -80, "#aaa")
+  let nearest = null
   for (const c of crates) {
     c.z += dt * 2.5
     if (c.z > 10) c.z -= 40
-    mesh3d(crate, {x: c.x, y: 0.6, z: c.z, ry: c.spin + t, color: "#c96"})
-    const p = project(c.x, 1.5, c.z)
-    if (p) text(p.x - 3, p.y - 1, "auth.ts", "#ffd")
+    mesh3d(crate, {x: c.x, y: 0.6, z: c.z, ry: c.spin + t, color: "#e0a060"})
+    if (c.z < 6 && (!nearest || c.z > nearest.z)) nearest = c
   }
-  const me = clawd3d(0, 0, 4 - t * 1.5, {size: 1.4, facing: 0, stride: floor(t * 6) % 4})
-  if (me && t > 1) say("Six crates, one road, zero tests passing yet.", me.top.x, me.row - 1)
+  // One label, on the nearest crate, placed with project().
+  const p = nearest && project(nearest.x, 1.5, nearest.z)
+  if (p) text(p.x - 3, p.y - 1, "auth.ts", "#ffd")
+  const me = clawd3d(0, 0, 4 - t * 1.5, {size: 1.4, facing: 0, stride: Math.floor(t * 6) % 4})
+  if (me && t > 1) say("Six crates, one road, zero tests passing yet.", me.top.x, me.row)
 }
 
 Reply with one scene as JSON matching the schema:

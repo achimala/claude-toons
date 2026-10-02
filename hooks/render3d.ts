@@ -1,8 +1,11 @@
-// A small 3D renderer for scene code: meshes in a world with a camera, one
-// directional light and distance fog, rasterized into a grid of pixels (two
-// to a cell) with a depth buffer. Flat shading: each triangle takes one
-// color, lit by how squarely it faces the light and faded by how far it is,
-// which is what reads as depth on a canvas this small.
+// A small 3D renderer for scene code, done the way terminal 3D is usually
+// done: the world is sampled at a finer grid than the cells (2 across and 4
+// down per cell, so the samples are square), each sample is lit with a
+// smoothly interpolated normal, and each cell is then drawn as the glyph
+// whose density matches the brightness its samples average to, in the
+// surface's color. Edges come out anti-aliased, since a half-covered cell
+// gets a lighter glyph, and shading reads through both the glyph ramp and
+// the color.
 
 import type { Rgb } from './effects'
 
@@ -24,24 +27,62 @@ export type Transform = {
   scale: Vec3
 }
 
-export const DEFAULT_CAMERA: Camera = { eye: [0, 2.5, 9], target: [0, 1, 0], fov: 90 }
+export type Style = { color: Rgb; wire: boolean; unlit: boolean }
 
-// The strip is wide and only 18 pixels tall, so the field of view is the
+export const DEFAULT_CAMERA: Camera = { eye: [0, 2.5, 9], target: [0, 1, 0], fov: 90 }
+export const DEFAULT_LIGHT: Light = { dir: [0.4, 1, 0.6], ambient: 0.25 }
+export const DEFAULT_FOG: Fog = { near: 8, far: 40, color: [0, 0, 0] }
+
+// The strip is wide and only 9 rows tall, so the field of view is the
 // angle across it, measured over this many columns whatever the terminal's
 // width: things stay the same size on a wider terminal, which shows more.
 const NOMINAL_COLS = 120
-export const DEFAULT_LIGHT: Light = { dir: [0.4, 1, 0.6], ambient: 0.35 }
-export const DEFAULT_FOG: Fog = { near: 8, far: 40, color: [0, 0, 0] }
 
-// Where the pixels go: the depth of each is kept for the frame.
-export type Target = {
+// Samples per cell, across and down.
+export const SX = 2
+export const SY = 4
+
+// Nothing nearer than this draws: the near plane, where geometry that
+// crosses behind the camera is cut.
+const NEAR = 0.05
+
+// The most triangles one frame draws, over every mesh.
+export const MOST_TRIANGLES = 20_000
+
+// A frame's samples: depth, the lit color, and what owns each (nothing, a
+// surface, or a sprite drawn in cells that the glyphs must leave alone).
+export type Frame = {
+  cols: number
+  rows: number
   w: number
   h: number
   depth: Float32Array
-  plot: (x: number, y: number, c: Rgb) => void
+  color: Float32Array
+  owner: Uint8Array
+  // Cells with surface samples drawn since the last composite.
+  dirty: Uint8Array
+  triangles: number
 }
 
-export const createDepth = (w: number, h: number) => new Float32Array(w * h).fill(Infinity)
+export const createFrame = (cols: number, rows: number): Frame => {
+  const w = cols * SX
+  const h = rows * SY
+
+  return {
+    cols,
+    rows,
+    w,
+    h,
+    depth: new Float32Array(w * h).fill(Infinity),
+    color: new Float32Array(w * h * 3),
+    owner: new Uint8Array(w * h),
+    dirty: new Uint8Array(cols * rows),
+    triangles: 0,
+  }
+}
+
+const SURFACE = 1
+const SPRITE = 2
 
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
@@ -58,17 +99,9 @@ const smooth = (lo: number, hi: number, v: number) => {
   return k * k * (3 - 2 * k)
 }
 
-// The camera resolved for a target: its axes, and the focal length that
-// turns view-space positions into pixels.
-export type View = {
-  eye: Vec3
-  right: Vec3
-  up: Vec3
-  forward: Vec3
-  f: number
-  w: number
-  h: number
-}
+// ---------------------------------------------------------------- camera
+
+export type View = { eye: Vec3; right: Vec3; up: Vec3; forward: Vec3; f: number; w: number; h: number }
 
 export function resolve(cam: Camera, w: number, h: number): View {
   const forward = norm(sub(cam.target, cam.eye))
@@ -76,15 +109,12 @@ export function resolve(cam: Camera, w: number, h: number): View {
   const right = norm(cross(forward, worldUp))
   const up = cross(right, forward)
   const fov = (Math.max(10, Math.min(170, cam.fov)) * Math.PI) / 180
+  // The focal length in samples: pixels over the nominal width, times the
+  // samples per column.
+  const f = ((NOMINAL_COLS / 2) * SX) / Math.tan(fov / 2)
 
-  return { eye: cam.eye, right, up, forward, f: NOMINAL_COLS / 2 / Math.tan(fov / 2), w, h }
+  return { eye: cam.eye, right, up, forward, f, w, h }
 }
-
-export type Projected = { x: number; y: number; depth: number }
-
-// Nothing nearer than this draws: the near plane, where geometry that
-// crosses behind the camera is cut.
-const NEAR = 0.05
 
 // A point in the camera's frame: across, up, and its depth ahead.
 type ViewPoint = { r: number; u: number; d: number }
@@ -95,13 +125,16 @@ const toView = (view: View, p: Vec3): ViewPoint => {
   return { r: dot(d, view.right), u: dot(d, view.up), d: dot(d, view.forward) }
 }
 
+// On the sample grid; `x` and `y` in samples.
+export type Projected = { x: number; y: number; depth: number }
+
 const toScreen = (view: View, v: ViewPoint): Projected => ({
   x: (v.r * view.f) / v.d + view.w / 2,
   y: view.h / 2 - (v.u * view.f) / v.d,
   depth: v.d,
 })
 
-// A world point on the pixel grid, or undefined behind the camera.
+// A world point on the sample grid, or undefined behind the camera.
 export function project(view: View, p: Vec3): Projected | undefined {
   const v = toView(view, p)
 
@@ -109,29 +142,43 @@ export function project(view: View, p: Vec3): Projected | undefined {
 }
 
 // The part of a polygon in front of the near plane (Sutherland-Hodgman
-// against one plane): the same polygon, a cut one, or nothing.
-function clipNear(poly: ViewPoint[]): ViewPoint[] {
-  if (poly.every(v => v.d >= NEAR)) return poly
-  const out: ViewPoint[] = []
+// against one plane), each vertex carrying its attributes along.
+type Vertex = { v: ViewPoint; p: Vec3; n: Vec3 }
+
+function clipNear(poly: Vertex[]): Vertex[] {
+  if (poly.every(x => x.v.d >= NEAR)) return poly
+  const out: Vertex[] = []
+  const mixv = (a: Vec3, b: Vec3, k: number): Vec3 => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k]
   for (let i = 0; i < poly.length; i++) {
     const a = poly[i]!
     const b = poly[(i + 1) % poly.length]!
-    const aIn = a.d >= NEAR
-    const bIn = b.d >= NEAR
+    const aIn = a.v.d >= NEAR
+    const bIn = b.v.d >= NEAR
     if (aIn) out.push(a)
     if (aIn !== bIn) {
-      const k = (NEAR - a.d) / (b.d - a.d)
-      out.push({ r: a.r + (b.r - a.r) * k, u: a.u + (b.u - a.u) * k, d: NEAR })
+      const k = (NEAR - a.v.d) / (b.v.d - a.v.d)
+      out.push({
+        v: { r: a.v.r + (b.v.r - a.v.r) * k, u: a.v.u + (b.v.u - a.v.u) * k, d: NEAR },
+        p: mixv(a.p, b.p, k),
+        n: mixv(a.n, b.n, k),
+      })
     }
   }
 
   return out
 }
 
-// The world position of a model-space point.
+// ---------------------------------------------------------------- meshes
+
 export function transformPoint(t: Transform, p: Vec3): Vec3 {
-  let [x, y, z] = [p[0] * t.scale[0], p[1] * t.scale[1], p[2] * t.scale[2]]
-  const [rx, ry, rz] = t.rot
+  const [x, y, z] = rotate(t.rot, [p[0] * t.scale[0], p[1] * t.scale[1], p[2] * t.scale[2]])
+
+  return [x + t.at[0], y + t.at[1], z + t.at[2]]
+}
+
+function rotate(rot: Vec3, p: Vec3): Vec3 {
+  let [x, y, z] = p
+  const [rx, ry, rz] = rot
   if (rx) {
     const c = Math.cos(rx)
     const s = Math.sin(rx)
@@ -148,29 +195,102 @@ export function transformPoint(t: Transform, p: Vec3): Vec3 {
     ;[x, y] = [x * c - y * s, x * s + y * c]
   }
 
-  return [x + t.at[0], y + t.at[1], z + t.at[2]]
+  return [x, y, z]
 }
 
-const shadeOf = (c: Rgb, k: number): Rgb => [c[0] * k, c[1] * k, c[2] * k]
+// A mesh with a normal for each corner of each face: faces meeting at a
+// gentle angle share smoothed normals (a sphere looks round), faces meeting
+// at a crease keep their own (a cube stays sharp).
+type Prepared = { faceNormals: Vec3[]; cornerNormals: Vec3[] }
+const prepared = new WeakMap<Mesh, Prepared>()
+const CREASE = Math.cos((50 * Math.PI) / 180)
+
+function prepare(mesh: Mesh): Prepared {
+  const done = prepared.get(mesh)
+  if (done) return done
+  const { verts, faces } = mesh
+  const at = (i: number): Vec3 => [verts[i * 3] ?? 0, verts[i * 3 + 1] ?? 0, verts[i * 3 + 2] ?? 0]
+  const count = Math.floor(faces.length / 3)
+  const faceNormals: Vec3[] = []
+  const around = new Map<number, number[]>()
+  for (let f = 0; f < count; f++) {
+    const [a, b, c] = [faces[f * 3]!, faces[f * 3 + 1]!, faces[f * 3 + 2]!]
+    faceNormals.push(norm(cross(sub(at(b), at(a)), sub(at(c), at(a)))))
+    for (const i of [a, b, c]) {
+      const list = around.get(i) ?? []
+      list.push(f)
+      around.set(i, list)
+    }
+  }
+  const cornerNormals: Vec3[] = []
+  for (let f = 0; f < count; f++) {
+    const mine = faceNormals[f]!
+    for (let k = 0; k < 3; k++) {
+      const i = faces[f * 3 + k]!
+      const sum: Vec3 = [0, 0, 0]
+      for (const g of around.get(i) ?? []) {
+        const other = faceNormals[g]!
+        if (dot(mine, other) >= CREASE) {
+          sum[0] += other[0]
+          sum[1] += other[1]
+          sum[2] += other[2]
+        }
+      }
+      cornerNormals.push(norm(sum))
+    }
+  }
+  const result = { faceNormals, cornerNormals }
+  prepared.set(mesh, result)
+
+  return result
+}
+
+// ---------------------------------------------------------------- drawing
+
 const fogged = (c: Rgb, fog: Fog, depth: number): Rgb => {
   const k = smooth(fog.near, fog.far, depth)
 
   return [c[0] + (fog.color[0] - c[0]) * k, c[1] + (fog.color[1] - c[1]) * k, c[2] + (fog.color[2] - c[2]) * k]
 }
 
-export type Style = { color: Rgb; wire: boolean; unlit: boolean }
+function plot(frame: Frame, x: number, y: number, depth: number, c: Rgb) {
+  const at = y * frame.w + x
+  frame.depth[at] = depth
+  frame.owner[at] = SURFACE
+  frame.color[at * 3] = c[0]
+  frame.color[at * 3 + 1] = c[1]
+  frame.color[at * 3 + 2] = c[2]
+  frame.dirty[Math.floor(y / SY) * frame.cols + Math.floor(x / SX)] = 1
+}
 
-// Fills one triangle given on the pixel grid with per-vertex depth, depth
-// tested, each pixel fogged by its depth.
-function fillTriangle(target: Target, fog: Fog, a: Projected, b: Projected, c: Projected, color: Rgb) {
+// Lights a point of a surface: ambient, diffuse by the normal against the
+// light, and a small highlight where the light reflects toward the eye.
+function lit(color: Rgb, n: Vec3, p: Vec3, view: View, l: Vec3, ambient: number): Rgb {
+  const toEye = norm(sub(view.eye, p))
+  // Two-sided: a face seen from behind shades as if it faced the eye.
+  const nn: Vec3 = dot(n, toEye) < 0 ? [-n[0], -n[1], -n[2]] : n
+  const diffuse = Math.max(0, dot(nn, l))
+  const half = norm([l[0] + toEye[0], l[1] + toEye[1], l[2] + toEye[2]])
+  const spec = Math.pow(Math.max(0, dot(nn, half)), 24) * 0.35
+  const k = ambient + (1 - ambient) * diffuse
+
+  return [Math.min(255, color[0] * k + 255 * spec), Math.min(255, color[1] * k + 255 * spec), Math.min(255, color[2] * k + 255 * spec)]
+}
+
+// Fills one triangle on the sample grid, interpolating depth (linear in
+// 1/depth), world position and normal, lighting each sample.
+function fillTriangle(frame: Frame, view: View, fog: Fog, l: Vec3, ambient: number, tri: [Vertex, Vertex, Vertex], style: Style) {
+  const [A, B, C] = tri
+  const a = toScreen(view, A.v)
+  const b = toScreen(view, B.v)
+  const c = toScreen(view, C.v)
   const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
-  if (Math.abs(area) < 1e-6) return
+  if (Math.abs(area) < 1e-9) return
   const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x, c.x)))
-  const x1 = Math.min(target.w - 1, Math.ceil(Math.max(a.x, b.x, c.x)))
+  const x1 = Math.min(frame.w - 1, Math.ceil(Math.max(a.x, b.x, c.x)))
   const y0 = Math.max(0, Math.floor(Math.min(a.y, b.y, c.y)))
-  const y1 = Math.min(target.h - 1, Math.ceil(Math.max(a.y, b.y, c.y)))
+  const y1 = Math.min(frame.h - 1, Math.ceil(Math.max(a.y, b.y, c.y)))
   if (x1 < x0 || y1 < y0) return
-  // Depth interpolates linearly in 1/depth across the screen.
   const ia = 1 / a.depth
   const ib = 1 / b.depth
   const ic = 1 / c.depth
@@ -178,59 +298,82 @@ function fillTriangle(target: Target, fog: Fog, a: Projected, b: Projected, c: P
     const py = y + 0.5
     for (let x = x0; x <= x1; x++) {
       const px = x + 0.5
-      const wa = ((b.x - px) * (c.y - py) - (b.y - py) * (c.x - px)) / area
-      const wb = ((c.x - px) * (a.y - py) - (c.y - py) * (a.x - px)) / area
-      const wc = 1 - wa - wb
-      if (wa < 0 || wb < 0 || wc < 0) continue
+      let wa = ((b.x - px) * (c.y - py) - (b.y - py) * (c.x - px)) / area
+      let wb = ((c.x - px) * (a.y - py) - (c.y - py) * (a.x - px)) / area
+      let wc = 1 - wa - wb
+      if (wa < -1e-6 || wb < -1e-6 || wc < -1e-6) continue
       const depth = 1 / (wa * ia + wb * ib + wc * ic)
-      const at = y * target.w + x
-      if (depth >= target.depth[at]!) continue
-      target.depth[at] = depth
-      target.plot(x, y, fogged(color, fog, depth))
+      const at = y * frame.w + x
+      if (depth >= frame.depth[at]!) continue
+      // Perspective-correct weights for the attributes.
+      wa *= ia * depth
+      wb *= ib * depth
+      wc *= ic * depth
+      let color = style.color
+      if (!style.unlit) {
+        const n = norm([
+          wa * A.n[0] + wb * B.n[0] + wc * C.n[0],
+          wa * A.n[1] + wb * B.n[1] + wc * C.n[1],
+          wa * A.n[2] + wb * B.n[2] + wc * C.n[2],
+        ])
+        const p: Vec3 = [
+          wa * A.p[0] + wb * B.p[0] + wc * C.p[0],
+          wa * A.p[1] + wb * B.p[1] + wc * C.p[1],
+          wa * A.p[2] + wb * B.p[2] + wc * C.p[2],
+        ]
+        color = lit(color, n, p, view, l, ambient)
+      }
+      plot(frame, x, y, depth, fogged(color, fog, depth))
     }
   }
 }
 
-// A line between two world points, depth tested along its length.
-export function drawLine(target: Target, view: View, fog: Fog, p0: Vec3, p1: Vec3, color: Rgb) {
-  const ends = clipNear([toView(view, p0), toView(view, p1)])
+// A line between two world points, a cell's width thick, cut at the near
+// plane and depth tested along its length.
+export function drawLine(frame: Frame, view: View, fog: Fog, p0: Vec3, p1: Vec3, color: Rgb) {
+  const zero: Vec3 = [0, 0, 0]
+  const ends = clipNear([
+    { v: toView(view, p0), p: p0, n: zero },
+    { v: toView(view, p1), p: p1, n: zero },
+  ])
   if (ends.length < 2) return
-  const a = toScreen(view, ends[0]!)
-  const b = toScreen(view, ends[1]!)
-  const steps = Math.min(600, Math.ceil(Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y))) || 1)
+  const a = toScreen(view, ends[0]!.v)
+  const b = toScreen(view, ends[1]!.v)
+  const steps = Math.min(1200, Math.ceil(Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y))) || 1)
   for (let i = 0; i <= steps; i++) {
     const k = i / steps
     const x = Math.floor(a.x + (b.x - a.x) * k)
     const y = Math.floor(a.y + (b.y - a.y) * k)
-    if (x < 0 || x >= target.w || y < 0 || y >= target.h) continue
     const depth = 1 / ((1 - k) / a.depth + k / b.depth)
-    const at = y * target.w + x
     // A little nearer than the surface it lies on, so edges show on faces.
-    if (depth - 0.02 >= target.depth[at]!) continue
-    target.depth[at] = depth - 0.02
-    target.plot(x, y, fogged(color, fog, depth))
+    dab(frame, x, y, depth - 0.03, fogged(color, fog, depth))
   }
 }
 
-export function drawPoint(target: Target, view: View, fog: Fog, p: Vec3, color: Rgb) {
+export function drawPoint(frame: Frame, view: View, fog: Fog, p: Vec3, color: Rgb) {
   const a = project(view, p)
   if (!a) return
-  const x = Math.floor(a.x)
-  const y = Math.floor(a.y)
-  if (x < 0 || x >= target.w || y < 0 || y >= target.h) return
-  const at = y * target.w + x
-  if (a.depth >= target.depth[at]!) return
-  target.depth[at] = a.depth
-  target.plot(x, y, fogged(color, fog, a.depth))
+  dab(frame, Math.floor(a.x), Math.floor(a.y), a.depth, fogged(color, fog, a.depth))
 }
 
-// The most triangles one frame draws, over every mesh.
-export const MOST_TRIANGLES = 20_000
+// A 2 by 2 sample dab: what a line or a point needs to read as a glyph.
+function dab(frame: Frame, x: number, y: number, depth: number, color: Rgb) {
+  for (let dy = 0; dy < 2; dy++) {
+    for (let dx = 0; dx < 2; dx++) {
+      const sx = x + dx
+      const sy = y + dy
+      if (sx < 0 || sx >= frame.w || sy < 0 || sy >= frame.h) continue
+      const at = sy * frame.w + sx
+      if (depth >= frame.depth[at]!) continue
+      plot(frame, sx, sy, depth, color)
+    }
+  }
+}
 
 // Draws a mesh placed by a transform: filled and lit, or as wire edges.
-// Returns the triangles drawn, for the frame's budget.
-export function drawMesh(target: Target, view: View, light: Light, fog: Fog, mesh: Mesh, t: Transform, style: Style, budget: number) {
+export function drawMesh(frame: Frame, view: View, light: Light, fog: Fog, mesh: Mesh, t: Transform, style: Style) {
   const { verts, faces } = mesh
+  const { cornerNormals } = prepare(mesh)
   const n = Math.floor(verts.length / 3)
   const world: Vec3[] = []
   const eyed: ViewPoint[] = []
@@ -240,39 +383,105 @@ export function drawMesh(target: Target, view: View, light: Light, fog: Fog, mes
     eyed.push(toView(view, p))
   }
   const l = norm(light.dir)
-  let drawn = 0
-  for (let i = 0; i + 2 < faces.length && drawn < budget; i += 3) {
-    const [ia, ib, ic] = [faces[i]!, faces[i + 1]!, faces[i + 2]!]
-    const va = eyed[ia]
-    const vb = eyed[ib]
-    const vc = eyed[ic]
-    const pa = world[ia]
-    const pb = world[ib]
-    const pc = world[ic]
-    if (!va || !vb || !vc || !pa || !pb || !pc) continue
-    // Behind the camera entirely: nothing to draw.
-    if (va.d < NEAR && vb.d < NEAR && vc.d < NEAR) continue
-    drawn += 1
+  const faceCount = Math.floor(faces.length / 3)
+  for (let f = 0; f < faceCount && frame.triangles < MOST_TRIANGLES; f++) {
+    const ids = [faces[f * 3]!, faces[f * 3 + 1]!, faces[f * 3 + 2]!]
+    const corners: Vertex[] = []
+    for (let k = 0; k < 3; k++) {
+      const v = eyed[ids[k]!]
+      const p = world[ids[k]!]
+      if (!v || !p) break
+      corners.push({ v, p, n: rotate(t.rot, cornerNormals[f * 3 + k] ?? [0, 1, 0]) })
+    }
+    if (corners.length < 3) continue
+    if (corners.every(c => c.v.d < NEAR)) continue
+    frame.triangles += 1
     if (style.wire) {
-      drawLine(target, view, fog, pa, pb, style.color)
-      drawLine(target, view, fog, pb, pc, style.color)
-      drawLine(target, view, fog, pc, pa, style.color)
+      drawLine(frame, view, fog, corners[0]!.p, corners[1]!.p, style.color)
+      drawLine(frame, view, fog, corners[1]!.p, corners[2]!.p, style.color)
+      drawLine(frame, view, fog, corners[2]!.p, corners[0]!.p, style.color)
       continue
     }
-    let color = style.color
-    if (!style.unlit) {
-      // Lit from either side, so a mesh wound inside out still shades.
-      const normal = norm(cross(sub(pb, pa), sub(pc, pa)))
-      const k = light.ambient + (1 - light.ambient) * Math.abs(dot(normal, l))
-      color = shadeOf(color, k)
+    const poly = clipNear(corners)
+    for (let j = 1; j + 1 < poly.length; j++) fillTriangle(frame, view, fog, l, light.ambient, [poly[0]!, poly[j]!, poly[j + 1]!], style)
+  }
+}
+
+// Claims a sprite's pixel (a column and a pixel row, two to a cell) at a
+// depth: true when it is nearer than what is there, in which case the
+// glyphs leave that pixel to the sprite.
+export function claimPixel(frame: Frame, col: number, py: number, depth: number) {
+  const x0 = col * SX
+  const y0 = py * (SY / 2)
+  if (x0 < 0 || x0 >= frame.w || y0 < 0 || y0 >= frame.h) return false
+  let nearest = Infinity
+  for (let dy = 0; dy < SY / 2; dy++) for (let dx = 0; dx < SX; dx++) nearest = Math.min(nearest, frame.depth[(y0 + dy) * frame.w + x0 + dx]!)
+  if (depth >= nearest) return false
+  for (let dy = 0; dy < SY / 2; dy++) {
+    for (let dx = 0; dx < SX; dx++) {
+      const at = (y0 + dy) * frame.w + x0 + dx
+      frame.depth[at] = depth
+      frame.owner[at] = SPRITE
     }
-    // A triangle crossing the near plane is cut there, leaving a triangle
-    // or a quad, drawn as a fan.
-    const poly = clipNear([va, vb, vc]).map(v => toScreen(view, v))
-    for (let j = 1; j + 1 < poly.length; j++) fillTriangle(target, fog, poly[0]!, poly[j]!, poly[j + 1]!, color)
   }
 
-  return drawn
+  return true
+}
+
+// ---------------------------------------------------------------- glyphs
+
+// Glyphs by brightness, sparse to dense.
+const RAMP = [...' .,:;-=+*#%@']
+
+// Draws the cells drawn on since the last composite: each as the glyph for
+// its samples' brightness (coverage counts, so edges thin out), colored
+// like its surface, over a dark tint of that color where it is solid.
+export function composite(frame: Frame, put: (col: number, row: number, char: string, color: Rgb, back?: Rgb) => void) {
+  const per = SX * SY
+  for (let row = 0; row < frame.rows; row++) {
+    for (let col = 0; col < frame.cols; col++) {
+      const cell = row * frame.cols + col
+      if (!frame.dirty[cell]) continue
+      frame.dirty[cell] = 0
+      let covered = 0
+      let sprite = 0
+      const sum: Rgb = [0, 0, 0]
+      for (let dy = 0; dy < SY; dy++) {
+        for (let dx = 0; dx < SX; dx++) {
+          const at = (row * SY + dy) * frame.w + col * SX + dx
+          const owner = frame.owner[at]
+          if (owner === SPRITE) sprite += 1
+          if (owner !== SURFACE) continue
+          covered += 1
+          sum[0] += frame.color[at * 3]!
+          sum[1] += frame.color[at * 3 + 1]!
+          sum[2] += frame.color[at * 3 + 2]!
+        }
+      }
+      // A cell a sprite holds is the sprite's.
+      if (covered === 0 || sprite > 0) continue
+      const mean: Rgb = [sum[0] / covered, sum[1] / covered, sum[2] / covered]
+      const brightness = (0.299 * mean[0] + 0.587 * mean[1] + 0.114 * mean[2]) / 255
+      const coverage = covered / per
+      // The glyph: brightness thinned by coverage. The ink keeps the surface
+      // hue at a floor so dark surfaces still read; the ground a dark tint.
+      // Mid-tones lean toward the denser glyphs (a gamma of 0.6), since on a
+      // dark terminal a surface half as bright still wants to read as solid.
+      const level = Math.min(RAMP.length - 1, Math.round(Math.pow(brightness, 0.6) * coverage * (RAMP.length - 1)))
+      const char = RAMP[Math.max(1, level)] ?? '.'
+      const ink = lift(mean)
+      const back: Rgb | undefined = coverage >= 0.5 ? [mean[0] * 0.18, mean[1] * 0.18, mean[2] * 0.18] : undefined
+      put(col, row, char, ink, back)
+    }
+  }
+}
+
+// Ink that stays visible: the color brightened toward its hue when dark.
+function lift(c: Rgb): Rgb {
+  const max = Math.max(c[0], c[1], c[2], 1)
+  const k = Math.max(1, 90 / max)
+
+  return [Math.min(255, c[0] * k), Math.min(255, c[1] * k), Math.min(255, c[2] * k)]
 }
 
 // ---------------------------------------------------------------- shapes
@@ -297,8 +506,8 @@ export function box(w: number, h: number, d: number): Mesh {
 }
 
 // A sphere of latitude rings and longitude segments.
-export function sphere(r: number, segments = 8): Mesh {
-  const seg = Math.max(3, Math.min(32, Math.round(segments)))
+export function sphere(r: number, segments = 12): Mesh {
+  const seg = Math.max(3, Math.min(48, Math.round(segments)))
   const rings = Math.max(2, Math.round(seg / 2))
   const verts: number[] = []
   const faces: number[] = []
@@ -325,8 +534,8 @@ export function sphere(r: number, segments = 8): Mesh {
 
 // A cylinder (or a cone when the top radius is 0) standing on the origin,
 // its base at y 0 and its top at y h.
-export function cylinder(rBottom: number, rTop: number, h: number, segments = 8): Mesh {
-  const seg = Math.max(3, Math.min(32, Math.round(segments)))
+export function cylinder(rBottom: number, rTop: number, h: number, segments = 12): Mesh {
+  const seg = Math.max(3, Math.min(48, Math.round(segments)))
   const verts: number[] = []
   const faces: number[] = []
   for (let j = 0; j < seg; j++) {
