@@ -1,0 +1,7 @@
+{
+  "name": "spinner-buddy",
+  "version": "0.1.0",
+  "description": "Animated cartoons of what Claude is doing, drawn under the spinner while it works",
+  "author": { "name": "Anshu Chimala" },
+  "license": "MIT"
+}
