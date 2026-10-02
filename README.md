@@ -1,20 +1,49 @@
 # claude-toons
 
-A Claude Code plugin that draws a little animated cartoon of what Claude is
-doing, right under the "thinking" spinner, while it works. Clawd, the Claude
-Code mascot, stars in every scene: running tests becomes a castle siege, a bug
-hunt becomes a safari, a long build becomes a rocket on the pad. A separate
-Claude model watches the tool calls and directs a new scene every few seconds.
+Little animated cartoons of what Claude is doing, drawn under the spinner in
+Claude Code while it works. Clawd, the Claude Code mascot, stars in every
+scene, and the scene follows the work: tests become a castle siege, a bug hunt
+becomes a safari, a long build becomes a rocket on the pad.
+
+![Clawd in a cartoon under the Claude Code spinner](docs/demo.gif)
 
 An independent project, not affiliated with or endorsed by Anthropic.
 
+## What it costs
+
+**On default settings, about 1 to 3% on top of what Claude Code already uses.**
+
+Most scenes come from a library of 138 ready-made scenes that ship with the
+plugin and cost nothing. A model is asked to draw a fresh scene only when you
+start a task or something fails, and at most once a minute. Each of those
+costs about 2 to 4 cents at API prices.
+
+The range depends on how you work. Long tasks land near 1%, because one fresh
+scene covers minutes of Claude's work. Rapid short back-and-forth lands near
+3%, because nearly every message starts a task. These figures assume Claude
+Code itself runs on Opus. On a cheaper model the share is larger.
+
+The requests use your Claude Code login and nothing else. On a subscription
+they count toward your plan's usage limits like any other Claude use. On an
+API key they're billed to that key. Nothing is spent while Claude is idle or
+the cartoons are hidden.
+
+If you turn ready-made scenes off, every scene is drawn fresh and the cost goes
+up a lot:
+
+| A new scene | Extra on top of Claude Code |
+|---|---|
+| Ready-made scenes on (default) | ~1–3% |
+| Ready-made off, every 15 seconds | ~5–10% |
+| Ready-made off, as fast as possible | ~15–25% |
+
+`/toons settings` shows what the cartoons have actually cost you, next to
+what Claude's own work costs, once there's enough to measure.
+
 ## Install
 
-The plugin is named `toons` inside Claude Code (so `/toons`, and "Toons" in
-`/config`); `claude-toons` is the repository.
-
-You need the Claude Code CLI with plugin hook modules available. They are an
-early-access feature; claude-toons was built on version 2.1.287.
+You need Claude Code with plugin hook modules, an early-access feature. This
+was built on version 2.1.287.
 
 1. Clone the repo:
 
@@ -28,10 +57,10 @@ early-access feature; claude-toons was built on version 2.1.287.
    claude --plugin-dir ~/src/claude-toons
    ```
 
-   Give Claude any task; the cartoons appear under the spinner while it works.
+   Give Claude any task. The cartoons appear under the spinner while it works.
 
 3. To load it in every session, add the folder to the `env` block of
-   `~/.claude/settings.json`, then restart Claude Code:
+   `~/.claude/settings.json` with its full path, then restart Claude Code:
 
    ```json
    {
@@ -41,168 +70,28 @@ early-access feature; claude-toons was built on version 2.1.287.
    }
    ```
 
-   Use the full path. To load several plugin folders, separate them with `:`
-   (`;` on Windows).
+To update, run `git pull` in the folder. A running session picks up the change
+on its own. To uninstall, remove the folder from `CLAUDE_CODE_PLUGIN_DIRS` and
+delete it.
 
-To update, `git pull` in the folder; a running session reloads the plugin when
-its files change. To uninstall, remove the folder from
-`CLAUDE_CODE_PLUGIN_DIRS` (or stop passing `--plugin-dir`) and delete it.
+**Nothing shows up?** Run `claude --debug` and look for a `toons` line. If it
+says hook modules are turned off, your Claude Code doesn't have the feature
+yet. Cartoons only appear while Claude is working, and only in the terminal.
 
-**Nothing shows up?** Run `claude --debug` and look for a `toons` line.
-A line saying hook modules are turned off means your Claude Code doesn't have
-the feature enabled yet; any other line names what went wrong. Cartoons only
-appear while Claude is working, and only in the terminal.
+## Using it
 
-## Controls
+- **`/toons`** shows or hides the cartoons, even mid-task. Hidden means no
+  scenes are requested at all. The choice is remembered across sessions.
+- **`/toons settings`** opens the settings and the cost figures. The same
+  settings are in `/config` under "Toons".
 
-- `/toons` shows or hides the cartoons, even while Claude is working.
-  `/toons on` and `/toons off` set it outright. The choice is remembered
-  across sessions. While hidden, no scenes are requested, so they cost nothing.
-- `/toons settings` opens a pane to pick the director model, whether it
-  thinks before each scene, whether ready-made scenes are dealt for routine
-  work (on by default; see below), which styles the scenes are drawn in (a
-  mix, 3D, pixel art or text art only, or everything but 3D), and how often a
-  new scene is requested, with an estimate of what that costs. The same
-  settings are also in `/config`.
-
-## What it costs
-
-Each scene is one request to the director model, made with your Claude Code
-session's own credentials and nothing else. On a subscription, that counts
-toward your plan's usage limits like any other Claude use; if the session itself
-runs on an API key, it is billed to that key. If the session's login can't make
-the requests, the cartoons switch off for the session. They never fall back to
-another key from your environment.
-
-By default most scenes come from a stock of ready-made ones that ship with
-the plugin, dealt for free: one for each kind of thing Claude does (thinking,
-searching, reading, editing, running tests, building, git, the web, waiting
-on subagents, writing the reply), labeled with the file or command at hand.
-The director is asked only when something happens worth a scene of its own
-(the task, a failure, the end of the turn, a scene whose code broke), and no
-more than once a minute. That keeps the cost to a fraction of the figures
-below: typically a dollar an hour or less on Sonnet. With "ready-made scenes"
-off, every scene is the director's:
-
-Rough API-price estimates for an hour of Claude working continuously with
-ready-made scenes off:
-
-| New scene | Haiku 4.5 | Sonnet 5.5 (default) | Opus 5.5 |
-|---|---|---|---|
-| as fast as possible | ~$7.50 | ~$8.50 | ~$9.50 |
-| every 15 seconds (default) | ~$2.50 | ~$5 | ~$9 |
-| every 30 seconds | ~$1.25 | ~$2.50 | ~$4.50 |
-| every minute | ~$0.65 | ~$1.25 | ~$2.25 |
-
-Most of a scene's cost is the scene itself: a thousand or so tokens of ASCII
-art and code at output prices. The conversation history behind it is read
-from the prompt cache at a tenth of the input price, and older scenes are kept
-only as one-line summaries, so it adds little. By default the director does
-not think before a scene on Sonnet (thinking is billed as output); the
-"director thinks" setting turns it on.
-"As fast as possible" costs about the same on Haiku and Sonnet because Haiku
-answers faster and so draws more scenes an hour; at a fixed pace it is half
-the price.
-
-Nothing is spent while Claude is idle or the cartoons are hidden.
-`/toons settings` replaces these estimates with what you have actually
-spent, once there is enough of it, and puts it beside what Claude's own work
-costs per hour, so the two read in the same unit: on a subscription both count
-toward the same limits, each in proportion to its cost.
-
-## How it works
-
-- **Watching:** a `tool.call` hook logs each tool Claude runs (command, file,
-  pattern, and whether it failed); `prompt.submit` and `turn.complete` mark
-  the turn's edges.
-- **Stock:** with ready-made scenes on (the default), the log is read for
-  what Claude is doing (`hooks/library.ts`) and routine news deals a scene
-  from the stock (`hooks/scenes.ts`) for that phase, a new one when the
-  phase changes or after 45 seconds, with `{what}` in it filled by the file
-  or command at hand. The director is asked only for news worth it, at most
-  once a minute. `bun scripts/library.ts` fills the stock through the Codex
-  CLI, checking that every scene it keeps draws for minutes without error.
-- **Directing:** whenever there is news, the log goes to the director model in one
-  conversation for the session, so each request reads the earlier ones from the
-  prompt cache. The conversation is cut back periodically so a long session
-  never outgrows the context window. Sonnet answers a scene as JSON
-  (structured outputs).
-- **Scenes:** a scene is a faint backdrop effect, particle swarms, actors
-  (frames of ASCII art moved by math expressions of time, like
-  `x = "mod(t*8, w+20) - 20"`), and optionally a program.
-- **Code:** a scene can carry a real program in a JavaScript-like language,
-  interpreted by `hooks/lang.ts`. It has closures, loops, arrays and objects,
-  destructuring, template literals, `switch`, Math, and the common array and
-  string methods. The top level runs once as setup; `frame(t, dt)` redraws
-  every frame, and state persists between frames. It draws with `put`, `text`,
-  `sprite`, `fill`, `line`, `circle` and `disc` in any foreground and
-  background color, `clawd()` for the mascot and `say()` for a speech bubble.
-  That is what makes physics, simulations, shaders and morphs possible.
-- **Pixels:** cells hold two pixels each (upper and lower half blocks), and
-  code can draw on that finer grid with `pixel()` and `pixels()` (pixel art
-  with a palette). Clawd is drawn on the same grid, with poses, a walk cycle,
-  eye states, claw poses, any color and up to 4x scale, and `clawd()` returns
-  anchor points (head, claw tips, feet, eyes) so a scene can put a hat on it
-  or a prop in its hand that moves with the claw.
-- **3D:** a small renderer (`hooks/render3d.ts`). The world is sampled at
-  2x4 points per cell, each sample is lit with a smoothly interpolated normal
-  (diffuse plus a highlight, with creases kept sharp), and each cell is drawn
-  from its samples the way terminal image viewers do: its four quarters are
-  split into two color groups and the cell becomes the quarter-block glyph
-  of that split with a color for each group, so a cell can hold an edge or a
-  gradient; a cell of one color stays solid. A dark rim marks where depth
-  jumps, so overlapping shapes read as separate. A mesh drawn `ascii` uses
-  the glyph whose density matches its brightness (`" .,:;-=+*#%@"`), the
-  classic terminal look. Distance fog reads as depth. Code builds boxes, spheres,
-  cylinders, cones, planes or its own meshes and draws them shaded or as
-  wireframes; `clawd3d()` stands Clawd at a world point as a lit solid (a
-  chamfered block with feet and claws, its eyes flat pixel art on its face),
-  sized by distance and kept above the strip's bottom edge, and `project()` maps a world point to the strip for labels and bubbles.
-- **Sandbox:** plugins have no `eval`, and the code comes from a model reading
-  your repo, so it runs in the interpreter alone: it can reach nothing but its
-  own values and the drawing calls. Every step burns fuel (1M for setup, 150k
-  per frame) and a frame may run for at most 80ms, so a runaway loop or a
-  fill the size of the world stops the scene, not the terminal. An error is
-  reported back to the model so it can fix the mistake.
-- **Variety:** each scene names its concept. Each request lists the last six to
-  avoid and deals a random world (deep sea, wild west, cooking show... 50 in
-  all) for the next scene. While nothing new happens, the scene playing keeps
-  animating on its own and nothing is requested; after a minute and a half
-  on one scene, a "still running" update asks for its next beat. A new scene
-  dissolves in over the old one, cell by cell.
-- **Drawing:** a `ui.render` hook on `Spinner` keeps the engine's own spinner
-  line and adds a `Raster` (a grid of colored cells) under it, repainted at
-  about 20 fps with `$.ui.blit`. Empty cells show the terminal's own background,
-  so the scene floats on the terminal.
-
-## Files
-
-- `hooks/register.tsx`: the hooks: watching, asking for scenes, drawing, the
-  `/toons` command and settings pane.
-- `hooks/cost.ts`: prices, cost estimates and how they are described.
-- `hooks/narrator.ts`: the conversation with the model and its prompt.
-- `hooks/library.ts`: reading the log for what Claude is doing, and dealing
-  stock scenes; `hooks/scenes.ts` is the stock, written by
-  `scripts/library.ts`.
-- `hooks/script.ts`: the scene renderer, the expression interpreter and the
-  drawing calls scene code uses.
-- `hooks/lang.ts`: the scene-code interpreter.
-- `hooks/clawd.ts`: the mascot's pixel art, poses and anchors.
-- `hooks/render3d.ts`: the 3D renderer.
-- `hooks/effects.ts`: the backdrop effects.
-
-## Development
-
-`claude plugin test .` runs the tests; `claude plugin validate .` checks the
-manifest and hooks. Once Claude Code has loaded the plugin, it writes types to
-`.claude-plugin/types/`, and `tsc -p .` type-checks it.
-
-Two things learned along the way:
-
-- A render hook can wrap the engine's own drawing: `await next(e)` returns
-  `{ type: 'engine', ref }`, which goes inside your tree.
-- `$` is never passed to helpers; keep helper modules pure and spell `$` calls
-  at the call site.
+| Setting | What it does |
+|---|---|
+| Ready-made scenes | On by default. Turning it off makes every scene fresh, at several times the cost. |
+| Scene styles | A mix, or only 3D, pixel art or text art, or everything but 3D. |
+| Director model | The model that draws fresh scenes. Sonnet by default. Haiku is cheaper, Opus is more inventive. |
+| New scene | How often fresh scenes may be requested when ready-made scenes are off. |
+| Director thinks | Lets the model think before each fresh scene. Off by default, since thinking costs more. |
 
 ## License
 
