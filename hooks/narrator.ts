@@ -167,6 +167,13 @@ const STYLES = ['3D', '3D', 'pixel art', 'text art']
 const MOST = 60
 const KEEP = 30
 
+// Older scenes are kept only as their concept line: the last FULL replies
+// stay whole (a "still" beat continues the latest), and once BATCH more have
+// piled up behind them they are collapsed together, so the cached prefix is
+// rebuilt once per batch rather than on every request.
+const FULL = 8
+const BATCH = 8
+
 // A line of the log that only says something is still going.
 const isQuiet = (line: string) => /^\+\d+s still /.test(line)
 
@@ -235,7 +242,7 @@ export type Narration = { script?: Script; error?: string; spent?: CallUsage }
 export const URL = 'https://api.anthropic.com/v1/messages'
 
 // The thread itself: the hooks send what it builds and hand back what came.
-export function createThread(model: Model) {
+export function createThread(model: Model, options: { isThinking?: boolean } = {}) {
   const messages: Message[] = []
   // Off once the API refuses the server-side fallback option.
   let canFallBack = true
@@ -256,7 +263,9 @@ export function createThread(model: Model) {
     const lines = activity.split('\n').filter(line => !line.startsWith('[strip ') && !line.startsWith("[your last scene's code"))
     task = lines.find(line => line.startsWith('[task] ')) ?? task
     if (messages.length >= MOST) {
+      const dropped = messages.slice(0, messages.length - KEEP).filter(m => m.role === 'assistant').length
       messages.splice(0, messages.length - KEEP)
+      collapsed = Math.max(0, collapsed - dropped)
       // The task the developer gave may have been cut: the first kept message
       // says it again.
       const first = messages[0]
@@ -274,6 +283,9 @@ export function createThread(model: Model) {
     const betas = [kind === 'bearer' ? 'oauth-2025-04-20' : '', canFallBack ? 'server-side-fallback-2026-07-01' : '']
     const body = {
       model,
+      // Sonnet can skip thinking, which is billed as output; Opus cannot, and
+      // Haiku does not think unless asked.
+      ...(model === 'claude-sonnet-5-5' && !options.isThinking ? { thinking: { type: 'between_tools' } } : {}),
       max_tokens: 16000,
       system: [
         ...(kind === 'bearer' ? [{ type: 'text', text: IDENTITY }] : []),
@@ -307,6 +319,38 @@ export function createThread(model: Model) {
     return true
   }
 
+  // How many replies from the start have been collapsed to their concept.
+  let collapsed = 0
+
+  // Collapses the oldest whole replies to their concept lines, a batch at a
+  // time. A reply holding a thinking block is left whole: editing such
+  // history can be refused.
+  const collapse = () => {
+    const replies = messages.map((m, i) => ({ m, i })).filter(({ m }) => m.role === 'assistant')
+    const whole = replies.length - collapsed
+    if (whole < FULL + BATCH) return
+    const batch = replies.slice(collapsed, replies.length - FULL)
+    if (batch.some(({ m }) => Array.isArray(m.content) && m.content.some(block => block.type === 'thinking' || block.type === 'redacted_thinking'))) return
+    for (const { m } of batch) {
+      const concept = conceptOf(m)
+      m.content = [{ type: 'text', text: JSON.stringify({ concept, note: 'an earlier scene, kept only as its concept' }) }]
+    }
+    collapsed += batch.length
+  }
+
+  // A reply's concept line, from its JSON.
+  const conceptOf = (m: Message) => {
+    if (typeof m.content === 'string') return ''
+    const text = m.content.find(block => block.type === 'text')?.text
+    try {
+      const raw = JSON.parse(typeof text === 'string' ? text : '') as { concept?: unknown }
+
+      return typeof raw.concept === 'string' ? raw.concept.slice(0, 140) : ''
+    } catch {
+      return ''
+    }
+  }
+
   // Closes the exchange unanswered: its activity goes with the next one.
   const abandon = () => {
     const open = messages.pop()
@@ -328,6 +372,7 @@ export function createThread(model: Model) {
       return { error: 'the API answered something unreadable' }
     }
     messages.push({ role: 'assistant', content: reply.content })
+    collapse()
     const spent: CallUsage = {
       input: reply.usage?.input_tokens ?? 0,
       output: reply.usage?.output_tokens ?? 0,
@@ -347,5 +392,5 @@ export function createThread(model: Model) {
     }
   }
 
-  return { ask, request, isFallbackRefused, abandon, accept }
+  return { ask, request, isFallbackRefused, abandon, accept, isThinking: Boolean(options.isThinking) }
 }

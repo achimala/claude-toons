@@ -12,6 +12,13 @@
       "default": "claude-sonnet-5-5",
       "options": ["claude-haiku-4-5", "claude-sonnet-5-5", "claude-opus-5-5"]
     },
+    "thinking": {
+      "type": "string",
+      "title": "Toons: director thinks",
+      "description": "Whether the director model thinks before each scene. Off is cheaper (thinking is billed as output); on may give more inventive scenes. Opus always thinks.",
+      "default": "off",
+      "options": ["off", "on"]
+    },
     "pace": {
       "type": "string",
       "title": "Toons: new scene",

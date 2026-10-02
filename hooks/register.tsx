@@ -27,7 +27,7 @@ const ROWS = 9
 // How long the band takes to rise to its full height when the spinner shows.
 const GROW_MS = 700
 // How long the log may stay quiet mid-turn before a "still going" line.
-const QUIET_MS = 10_000
+const QUIET_MS = 20_000
 // The settings pane, and the slash command that toggles the cartoons or opens it.
 const PANE = 'toons'
 const COMMAND = 'toons'
@@ -125,11 +125,11 @@ type Buddy = {
   accruedAt: number
 }
 
-function createBuddy(model: Model, pace: Pace): Buddy {
+function createBuddy(model: Model, pace: Pace, isThinking: boolean): Buddy {
   return {
     model,
     pace,
-    thread: createThread(model),
+    thread: createThread(model, { isThinking }),
     pending: [],
     startedAt: 0,
     lastCall: 0,
@@ -239,8 +239,9 @@ function ask($: EngineInterface, b: Buddy) {
   void (async () => {
     while (b.isTurn && b.isShown && !b.isRefused) {
       const now = await $.clock.now()
-      // A quiet stretch mid-turn is news too: what is still going on.
-      const quiet = Math.max(QUIET_MS, gapMs)
+      // A quiet stretch mid-turn is news too: what is still going on. The
+      // scene animates on its own, so one such beat per two paces is plenty.
+      const quiet = Math.max(QUIET_MS, gapMs * 2)
       if (b.pending.length === 0 && now - b.loggedAt >= quiet && now - b.lastCall >= quiet) {
         const oldest = [...b.running.values()].sort((x, y) => x.at - y.at)[0]
         if (oldest) note(b, now, `still running ${oldest.what} (${Math.round((now - oldest.at) / 1000)}s so far)`)
@@ -346,7 +347,11 @@ function animate($: EngineInterface, b: Buddy) {
 
 export const register: Register = (on, options) => {
   const settings = options as Record<string, unknown>
-  const b = createBuddy(isModel(settings.model) ? settings.model : 'claude-sonnet-5-5', isPace(settings.pace) ? settings.pace : 'every 15 seconds')
+  const b = createBuddy(
+    isModel(settings.model) ? settings.model : 'claude-sonnet-5-5',
+    isPace(settings.pace) ? settings.pace : 'every 15 seconds',
+    settings.thinking === 'on',
+  )
 
   on('session.start', async ($, e, next) => {
     b.isShown = (await $.store.get('isShown')) !== false
@@ -484,6 +489,13 @@ export const register: Register = (on, options) => {
           options={PACES.map(p => ({ value: p }))}
           value={b.pace}
           onSelect={(value: string) => void setOption($, 'pace', value)}
+        />
+        <Select
+          key="thinking"
+          label="Director thinks   "
+          options={[{ value: 'off', label: 'off (cheaper)' }, { value: 'on' }]}
+          value={b.thread.isThinking ? 'on' : 'off'}
+          onSelect={(value: string) => void setOption($, 'thinking', value)}
         />
         <Text dimColor>Toggle any time with /toons, even while Claude works</Text>
 

@@ -58,9 +58,9 @@ appear while Claude is working, and only in the terminal.
 - `/toons` shows or hides the cartoons, even while Claude is working.
   `/toons on` and `/toons off` set it outright. The choice is remembered
   across sessions. While hidden, no scenes are requested, so they cost nothing.
-- `/toons settings` opens a pane to pick the director model and how often a
-  new scene is requested, with an estimate of what that costs. The same two
-  settings are also in `/config`.
+- `/toons settings` opens a pane to pick the director model, whether it
+  thinks before each scene, and how often a new scene is requested, with an
+  estimate of what that costs. The same settings are also in `/config`.
 
 ## What it costs
 
@@ -82,7 +82,10 @@ Rough API-price estimates for an hour of Claude working continuously:
 
 Most of a scene's cost is the scene itself: a thousand or so tokens of ASCII
 art and code at output prices. The conversation history behind it is read
-from the prompt cache at a tenth of the input price, so it adds little.
+from the prompt cache at a tenth of the input price, and older scenes are kept
+only as one-line summaries, so it adds little. By default the director does
+not think before a scene on Sonnet (thinking is billed as output); the
+"director thinks" setting turns it on.
 "As fast as possible" costs about the same on Haiku and Sonnet because Haiku
 answers faster and so draws more scenes an hour; at a fixed pace it is half
 the price.
