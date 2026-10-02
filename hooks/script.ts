@@ -1033,6 +1033,7 @@ export function stage(frame: Stage): string {
         const near = lastClawd && x >= lastClawd.x0 - 2 && x <= lastClawd.x1 + 2 && y >= lastClawd.y0 - 1 && y <= lastClawd.y1 + 1
         const speaker: Box = near && lastClawd ? lastClawd : { x0: x, y0: y, x1: x, y1: y }
         const placed3 = placeBubble({ speaker, wide, tall, cols, rows, covered: inked, last: code.bubblesAt.get(text) })
+        if (code.bubblesAt.size >= 32) code.bubblesAt.clear()
         code.bubblesAt.set(text, { x: placed3.x, y: placed3.y })
         bubbles.push({ lines, x: placed3.x, y: placed3.y, wide, tall, base: color, tail: placed3.tail })
       },

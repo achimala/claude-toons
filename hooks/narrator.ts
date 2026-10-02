@@ -272,8 +272,11 @@ export function createThread(model: Model, options: { isThinking?: boolean; styl
   // Opens the next exchange with what happened since the last scene; new work
   // also gets the recent concepts to steer clear of and a fresh world.
   const ask = (activity: string, random: () => number = Math.random) => {
-    const lines = activity.split('\n').filter(line => !line.startsWith('[strip ') && !line.startsWith("[your last scene's code"))
+    const lines = activity.split('\n').filter(line => !line.startsWith('[strip '))
     task = lines.find(line => line.startsWith('[task] ')) ?? task
+    // A scene whose code broke is not one to continue: a quiet beat after it
+    // asks for a new scene.
+    const isBroken = lines.some(line => line.startsWith("[your last scene's code"))
     if (messages.length >= MOST) {
       const dropped = messages.slice(0, messages.length - KEEP).filter(m => m.role === 'assistant').length
       messages.splice(0, messages.length - KEEP)
@@ -284,7 +287,7 @@ export function createThread(model: Model, options: { isThinking?: boolean; styl
       if (first && typeof first.content === 'string' && task && !first.content.includes(task)) first.content = `${task}\n${first.content}`
     }
     const recent = concepts.slice(-RECENT)
-    const steer = lines.length > 0 && lines.every(isQuiet)
+    const steer = lines.length > 0 && !isBroken && lines.every(isQuiet)
       ? [`[playing: ${recent[recent.length - 1] ?? 'the first scene'}; answer continue: true to keep it, or its next beat]`]
       : [...(recent.length > 0 ? [`[recent scenes: ${recent.join(' / ')}]`] : []), `[world: ${deal(random)}]`, `[style: ${styles[Math.floor(random() * styles.length)]}]`]
     messages.push({ role: 'user', content: [activity, ...steer].join('\n') })

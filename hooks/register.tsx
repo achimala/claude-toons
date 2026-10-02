@@ -261,13 +261,16 @@ function ask($: EngineInterface, b: Buddy) {
         b.thread.ask(`[strip ${b.cols}x${ROWS}]\n${activity}`)
         const told = await requestScene($, b)
         if (told.spent) {
+          // A continue reply costs, but is not a scene.
           const usd = costOf(b.model, told.spent)
           const spend = bucket(b)
           spend.usd += usd
-          spend.scenes += 1
           addTokens(spend, told.spent)
           b.sessionUsd += usd
-          b.sessionScenes += 1
+          if (!told.isContinued) {
+            spend.scenes += 1
+            b.sessionScenes += 1
+          }
           await $.store.set('stats', b.stats).catch(() => {})
         }
         if (told.script) {

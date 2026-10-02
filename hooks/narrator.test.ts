@@ -78,3 +78,13 @@ test('the styles setting decides which style a new scene is dealt', () => {
   expect(dealt('no 3D')).toEqual(['pixel art', 'text art'])
   expect(dealt('mix')).toEqual(['3D', 'pixel art', 'text art'])
 })
+
+test('a quiet beat after a scene whose code broke asks for a new scene, not a continue', () => {
+  const thread = createThread('claude-sonnet-5-5')
+  thread.ask('[strip 80x9]\n[task] x')
+  thread.accept(scene('a broken one'))
+  thread.ask("[strip 80x9]\n[your last scene's code stopped: nope is not defined]\n+30s still running Bash `npm test` (30s so far)")
+  const asked = JSON.parse(thread.request('bearer').body).messages.at(-1).content as string
+  expect(asked).toContain('[world: ')
+  expect(asked.includes('[playing: ')).toBe(false)
+})
