@@ -64,14 +64,37 @@ export function whatOf(line: string): string | undefined {
   return name.replace(/["\\]/g, '').slice(0, 20) || undefined
 }
 
-// A scene from the stock for a phase, as the raw object the director would
-// have answered, with "{what}" in it filled in; none of the recent concepts,
-// if it can be helped. Nothing when the stock has none for the phase.
-export function deal(phase: Phase, recent: string[], what: string | undefined, random: () => number = Math.random): { concept: string; raw: unknown } | undefined {
-  const mine = SCENES.filter(s => s.phase === phase)
-  if (mine.length === 0) return undefined
-  const fresh = mine.filter(s => !recent.includes(s.concept))
-  const pick = (fresh.length > 0 ? fresh : mine)[Math.floor(random() * (fresh.length > 0 ? fresh : mine).length)] as Stock
+export const STYLES = ['3D', 'pixel art', 'text art'] as const
+export type Style = (typeof STYLES)[number]
+
+// How a scene is really drawn, by what its code calls: the style it was
+// dealt is a request the model may not have honored.
+export function styleOf(scene: unknown): Style {
+  const code = JSON.stringify(scene)
+  if (/\b(camera|mesh3d|clawd3d|line3d)\(/.test(code)) return '3D'
+  if (/\bpixels?\(/.test(code)) return 'pixel art'
+
+  return 'text art'
+}
+
+// The stock, dealt like cards: each phase has a shuffled deck of its scenes
+// in the styles allowed, and a scene comes around again only once the rest
+// of its deck has been dealt.
+export type Dealer = { styles: readonly string[]; decks: Map<Phase, Stock[]> }
+
+export const createDealer = (styles: readonly string[]): Dealer => ({ styles, decks: new Map() })
+
+// A scene for a phase, as the raw object the director would have answered,
+// with "{what}" in it filled in. Nothing when the stock has none for the
+// phase in the styles allowed.
+export function deal(dealer: Dealer, phase: Phase, what: string | undefined, random: () => number = Math.random): { concept: string; raw: unknown } | undefined {
+  let deck = dealer.decks.get(phase)
+  if (!deck || deck.length === 0) {
+    deck = SCENES.filter(s => s.phase === phase && dealer.styles.includes(s.style)).sort(() => random() - 0.5)
+    dealer.decks.set(phase, deck)
+  }
+  const pick = deck.pop()
+  if (!pick) return undefined
   const filled = JSON.stringify(pick.scene).split('{what}').join(JSON.stringify(what ?? 'the code').slice(1, -1))
 
   return { concept: pick.concept, raw: JSON.parse(filled) }

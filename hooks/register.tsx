@@ -19,8 +19,9 @@ import {
   type Stats,
   type Window,
 } from './cost'
-import { deal, isInteresting, phaseOf, whatOf, type Phase } from './library'
+import { createDealer, deal, isInteresting, phaseOf, whatOf, type Dealer, type Phase } from './library'
 import { STYLE_SETS, URL, createThread, isStyleSet, type Narration, type StyleSet } from './narrator'
+import { SCENES } from './scenes'
 import { cleanScript, stage, type Script } from './script'
 
 const PLUGIN = 'toons'
@@ -38,8 +39,8 @@ const BEAT_MS = 90_000
 // scene), and no more often than this; everything else deals a stock scene.
 const LIVE_MS = 60_000
 // How long a scene plays before routine news in the same phase deals the
-// next stock scene.
-const STOCK_MS = 45_000
+// next stock scene: they are written to carry a minute or two.
+const STOCK_MS = 60_000
 // The settings pane, and the slash command that toggles the cartoons or opens it.
 const PANE = 'toons'
 const COMMAND = 'toons'
@@ -110,11 +111,11 @@ type Buddy = {
   // playing was dealt for, when the director was last asked, the concepts
   // of recent stock scenes, and how many were dealt this session.
   isStock: boolean
+  dealer: Dealer
   doing: Phase
   what?: string
   scenePhase?: Phase
   liveAt: number
-  stockRecent: string[]
   sessionStock: number
   // The spinner being drawn on, its width, when it showed, and the rows the
   // band was last drawn with.
@@ -153,9 +154,9 @@ type Buddy = {
 function createBuddy(model: Model, pace: Pace, isThinking: boolean, styles: StyleSet, isStock: boolean): Buddy {
   return {
     isStock,
+    dealer: createDealer(STYLE_SETS[styles]),
     doing: 'thinking',
     liveAt: 0,
-    stockRecent: [],
     sessionStock: 0,
     model,
     pace,
@@ -236,12 +237,11 @@ function show(b: Buddy, script: Script, at: number) {
 
 // A stock scene for what Claude is doing, if there is one it can draw.
 function dealStock(b: Buddy, at: number) {
-  const got = deal(b.doing, b.stockRecent, b.what)
+  const got = deal(b.dealer, b.doing, b.what)
   const script = got && cleanScript(got.raw)
   if (!got || !script) return false
   // A stock scene that breaks is not the director's to fix.
   if (script.code) script.code.isReported = true
-  b.stockRecent = [...b.stockRecent, got.concept].slice(-8)
   b.sessionStock += 1
   show(b, script, at)
 
@@ -326,8 +326,11 @@ function ask($: EngineInterface, b: Buddy) {
         // the log waits for the director's next turn: news worth it, once
         // LIVE_MS have passed since its last scene.
         const isNews = Boolean(broken) || b.pending.some(isInteresting)
-        if (b.isStock && !(isNews && now - b.liveAt >= LIVE_MS)) {
-          const isStale = b.doing !== b.scenePhase || now - b.sceneAt >= STOCK_MS || Boolean(b.scene.code?.error)
+        const isStale = b.doing !== b.scenePhase || now - b.sceneAt >= STOCK_MS || Boolean(b.scene.code?.error)
+        // The stock has nothing for this phase in the styles allowed: the
+        // director draws it, at the same spacing.
+        const isUnstocked = b.isStock && isStale && !SCENES.some(s => s.phase === b.doing && b.dealer.styles.includes(s.style))
+        if (b.isStock && !((isNews || isUnstocked) && now - b.liveAt >= LIVE_MS)) {
           if (isStale && dealStock(b, now)) $.ui.invalidate('ui.render')
           // The log keeps its task line and its latest lines.
           if (b.pending.length > 60) b.pending = [...b.pending.filter(line => line.startsWith('[task] ')).slice(-1), ...b.pending.slice(-50)]

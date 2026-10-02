@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { PHASES, deal, isInteresting, phaseOf, whatOf } from './library'
+import { PHASES, STYLES, createDealer, deal, isInteresting, phaseOf, styleOf, whatOf } from './library'
 import { SCENES } from './scenes'
 import { cleanScript, stage } from './script'
 
@@ -33,9 +33,7 @@ test('every stock scene draws for minutes without error, with the placeholder fi
   expect(SCENES.length).toBeGreaterThan(0)
   for (const stock of SCENES) {
     expect(PHASES).toContain(stock.phase)
-    const got = deal(stock.phase, [], 'auth.ts', () => 0)
-    expect(got).toBeDefined()
-    expect(JSON.stringify(got?.raw)).not.toContain('{what}')
+    expect(styleOf(stock.scene)).toBe(stock.style)
     const script = cleanScript(JSON.parse(JSON.stringify(stock.scene).split('{what}').join('auth.ts')))
     expect(script).toBeDefined()
     if (!script) continue
@@ -46,14 +44,21 @@ test('every stock scene draws for minutes without error, with the placeholder fi
   }
 })
 
-test('dealing avoids the recent concepts when it can, and nothing for a phase without stock', () => {
+test('a dealer deals each scene of a phase once before any comes around again, in the styles allowed', () => {
   const phase = SCENES[0]?.phase
   if (!phase) return
-  const mine = SCENES.filter(s => s.phase === phase).map(s => s.concept)
-  const first = deal(phase, [], 'x', () => 0)?.concept
-  expect(mine).toContain(first)
-  if (mine.length > 1) expect(deal(phase, [first ?? ''], 'x', () => 0)?.concept).not.toBe(first)
-  // With every concept recent, something is still dealt.
-  expect(deal(phase, mine, 'x')?.concept).toBeDefined()
-  expect(deal('writing', [], 'x', () => 0.99)?.concept === undefined || SCENES.some(s => s.phase === 'writing')).toBe(true)
+  const mine = SCENES.filter(s => s.phase === phase)
+  const dealer = createDealer(STYLES)
+  const dealt = mine.map(() => deal(dealer, phase, 'auth.ts')?.concept)
+  expect(new Set(dealt).size).toBe(mine.length)
+  expect(JSON.stringify(deal(dealer, phase, 'auth.ts')?.raw)).not.toContain('{what}')
+  // Only the styles allowed are dealt.
+  const flat = createDealer(['pixel art', 'text art'])
+  for (let i = 0; i < 30; i++) {
+    const got = deal(flat, 'testing', 'x')
+    if (!got) break
+    expect(styleOf(got.raw)).not.toBe('3D')
+  }
+  // A phase with nothing in the styles allowed deals nothing.
+  expect(deal(createDealer([]), phase, 'x')).toBeUndefined()
 })

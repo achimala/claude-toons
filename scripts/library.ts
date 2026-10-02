@@ -2,9 +2,11 @@
 // through the Codex CLI for one scene at a time, checking each one draws,
 // and keeping the ones that do.
 //
-//   bun scripts/library.ts [--per N] [--phases a,b] [--jobs N] [--model M] [--anthropic]
+//   bun scripts/library.ts [--per N] [--phases a,b] [--style S] [--jobs N] [--model M] [--anthropic]
 //
-// --per is how many scenes each phase should end up with (default 6). The
+// --per is how many scenes each phase should end up with (default 6); with
+// --style (3D, pixel art, text art) it counts and asks for scenes really
+// drawn in that style, since a model may not draw in the style it is dealt. The
 // model is asked through the Codex CLI (its default model, or --model), or
 // with --anthropic through the Anthropic API with ANTHROPIC_API_KEY (the
 // director's prompt and settings, on --model or Opus 5.5). --per counts
@@ -15,7 +17,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { PHASES, brief, type Phase } from '../hooks/library'
+import { PHASES, STYLES, brief, styleOf, type Phase, type Style } from '../hooks/library'
 import { SCHEMA, STYLE_SETS, SYSTEM, URL as API, WORLDS, createThread } from '../hooks/narrator'
 import { isModel } from '../hooks/cost'
 import { SCENES, type Stock } from '../hooks/scenes'
@@ -32,6 +34,8 @@ const jobs = Number(opt('jobs', '4'))
 const isAnthropic = args.includes('--anthropic')
 const model = opt('model', isAnthropic ? 'claude-opus-5-5' : '')
 const source = isAnthropic ? model : `codex:${model || 'default'}`
+const style = opt('style', '')
+if (style && !(STYLES as readonly string[]).includes(style)) throw new Error(`style must be one of ${STYLES.join(', ')}`)
 const phases = opt('phases', PHASES.join(',')).split(',').filter((p): p is Phase => (PHASES as readonly string[]).includes(p))
 const OUT = new URL('../hooks/scenes.ts', import.meta.url).pathname
 
@@ -85,7 +89,10 @@ async function generate(phase: Phase, world: string, style: string): Promise<Sto
   // A newline escaped twice draws as a literal backslash-n.
   if (JSON.stringify(raw).includes('\\\\\\\\n')) return 'a newline escaped twice'
 
-  return { phase, world, style, concept: concept.trim().slice(0, 140), source, scene: raw }
+  const drawn = styleOf(raw)
+  if (style && drawn !== style) return `drawn as ${drawn}, not ${style}`
+
+  return { phase, world, style: drawn, concept: concept.trim().slice(0, 140), source, scene: raw }
 }
 
 async function askCodex(phase: Phase, world: string, style: string): Promise<unknown | string> {
@@ -133,7 +140,7 @@ ${body}
 
 const stock = [...SCENES]
 const wanted: Phase[] = []
-for (const phase of phases) for (let n = stock.filter(s => s.phase === phase && s.source === source).length; n < per; n++) wanted.push(phase)
+for (const phase of phases) for (let n = stock.filter(s => s.phase === phase && s.source === source && (!style || s.style === style)).length; n < per; n++) wanted.push(phase)
 console.log(`${stock.length} in stock; ${wanted.length} to make from ${source}, ${jobs} at a time`)
 const styles = STYLE_SETS.mix
 let made = 0
@@ -145,18 +152,18 @@ const worker = async (most = Infinity) => {
     const used = stock.filter(s => s.phase === phase).map(s => s.world)
     const open = WORLDS.filter(w => !used.includes(w))
     const world = (open.length > 0 ? open : WORLDS)[Math.floor(Math.random() * (open.length > 0 ? open : WORLDS).length)] as string
-    const style = styles[Math.floor(Math.random() * styles.length)] as string
-    const got = await generate(phase, world, style)
+    const dealt = (style || styles[Math.floor(Math.random() * styles.length)]) as Style
+    const got = await generate(phase, world, dealt)
     if (typeof got === 'string') {
       failed += 1
-      console.log(`  ${phase} / ${world} / ${style}: ${got}`)
+      console.log(`  ${phase} / ${world} / ${dealt}: ${got}`)
       // One more try for this phase, with another world and style.
       if (failed <= wanted.length + 20) wanted.push(phase)
       continue
     }
     stock.push(got)
     made += 1
-    console.log(`+ ${phase} / ${world} / ${style}: ${got.concept}`)
+    console.log(`+ ${phase} / ${world} / ${got.style}: ${got.concept}`)
     await save(stock)
   }
 }
