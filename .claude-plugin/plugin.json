@@ -12,6 +12,13 @@
       "default": "claude-sonnet-5-5",
       "options": ["claude-haiku-4-5", "claude-sonnet-5-5", "claude-opus-5-5"]
     },
+    "styles": {
+      "type": "string",
+      "title": "Toons: scene styles",
+      "description": "Which ways the scenes are drawn: a mix (3D most often, pixel art, text art), one style only, or everything but 3D.",
+      "default": "mix",
+      "options": ["mix", "3D", "pixel art", "text art", "no 3D"]
+    },
     "thinking": {
       "type": "string",
       "title": "Toons: director thinks",

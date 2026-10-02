@@ -61,3 +61,20 @@ test('a "still running" beat invites a continue reply, which keeps the scene', (
   thread.ask('[strip 80x9]\n+40s -> started Read `a.ts`')
   expect(JSON.parse(thread.request('bearer').body).messages.at(-1).content).toContain('[recent scenes: a siege]')
 })
+
+test('the styles setting decides which style a new scene is dealt', () => {
+  const dealt = (styles: 'mix' | '3D' | 'no 3D') => {
+    const seen = new Set<string>()
+    for (let i = 0; i < 40; i++) {
+      const thread = createThread('claude-sonnet-5-5', { styles })
+      thread.ask('[strip 80x9]\n[task] x', () => (i % 40) / 40)
+      const content = JSON.parse(thread.request('bearer').body).messages[0].content as string
+      seen.add(/\[style: ([^\]]+)\]/.exec(content)?.[1] ?? '')
+    }
+
+    return [...seen].sort()
+  }
+  expect(dealt('3D')).toEqual(['3D'])
+  expect(dealt('no 3D')).toEqual(['pixel art', 'text art'])
+  expect(dealt('mix')).toEqual(['3D', 'pixel art', 'text art'])
+})

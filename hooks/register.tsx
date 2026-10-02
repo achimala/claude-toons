@@ -19,7 +19,7 @@ import {
   type Stats,
   type Window,
 } from './cost'
-import { URL, createThread, type Narration } from './narrator'
+import { STYLE_SETS, URL, createThread, isStyleSet, type Narration, type StyleSet } from './narrator'
 import { cleanScript, stage, type Script } from './script'
 
 const PLUGIN = 'toons'
@@ -125,11 +125,11 @@ type Buddy = {
   accruedAt: number
 }
 
-function createBuddy(model: Model, pace: Pace, isThinking: boolean): Buddy {
+function createBuddy(model: Model, pace: Pace, isThinking: boolean, styles: StyleSet): Buddy {
   return {
     model,
     pace,
-    thread: createThread(model, { isThinking }),
+    thread: createThread(model, { isThinking, styles }),
     pending: [],
     startedAt: 0,
     lastCall: 0,
@@ -361,6 +361,7 @@ export const register: Register = (on, options) => {
     isModel(settings.model) ? settings.model : 'claude-sonnet-5-5',
     isPace(settings.pace) ? settings.pace : 'every 15 seconds',
     settings.thinking === 'on',
+    isStyleSet(settings.styles) ? settings.styles : 'mix',
   )
 
   on('session.start', async ($, e, next) => {
@@ -506,6 +507,13 @@ export const register: Register = (on, options) => {
           options={[{ value: 'off', label: 'off (cheaper)' }, { value: 'on' }]}
           value={b.thread.isThinking ? 'on' : 'off'}
           onSelect={(value: string) => void setOption($, 'thinking', value)}
+        />
+        <Select
+          key="styles"
+          label="Scene styles      "
+          options={Object.keys(STYLE_SETS).map(value => ({ value, label: value === 'mix' ? 'mix (3D, pixel art, text art)' : value }))}
+          value={b.thread.styles}
+          onSelect={(value: string) => void setOption($, 'styles', value)}
         />
         <Text dimColor>Toggle any time with /toons, even while Claude works</Text>
 

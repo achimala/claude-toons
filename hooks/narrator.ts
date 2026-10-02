@@ -158,9 +158,18 @@ const WORLDS = [
 // How many past concepts each new request lists.
 const RECENT = 6
 
-// Drawing styles dealt with the world: 3D twice as often as the others,
-// since it is the one the model reaches for least on its own.
-const STYLES = ['3D', '3D', 'pixel art', 'text art']
+// The drawing styles dealt with the world, per the "styles" setting: the
+// mix deals 3D twice as often, since it is the one the model reaches for
+// least on its own.
+export const STYLE_SETS = {
+  mix: ['3D', '3D', 'pixel art', 'text art'],
+  '3D': ['3D'],
+  'pixel art': ['pixel art'],
+  'text art': ['text art'],
+  'no 3D': ['pixel art', 'text art'],
+} as const
+export type StyleSet = keyof typeof STYLE_SETS
+export const isStyleSet = (v: unknown): v is StyleSet => typeof v === 'string' && v in STYLE_SETS
 
 // The thread is cut back to KEEP messages once it reaches MOST, so a long
 // session never outgrows the context window; cutting in one go, not a little
@@ -244,7 +253,8 @@ export type Narration = { script?: Script; isContinued?: boolean; error?: string
 export const URL = 'https://api.anthropic.com/v1/messages'
 
 // The thread itself: the hooks send what it builds and hand back what came.
-export function createThread(model: Model, options: { isThinking?: boolean } = {}) {
+export function createThread(model: Model, options: { isThinking?: boolean; styles?: StyleSet } = {}) {
+  const styles: readonly string[] = STYLE_SETS[options.styles ?? 'mix']
   const messages: Message[] = []
   // Off once the API refuses the server-side fallback option.
   let canFallBack = true
@@ -276,7 +286,7 @@ export function createThread(model: Model, options: { isThinking?: boolean } = {
     const recent = concepts.slice(-RECENT)
     const steer = lines.length > 0 && lines.every(isQuiet)
       ? [`[playing: ${recent[recent.length - 1] ?? 'the first scene'}; answer continue: true to keep it, or its next beat]`]
-      : [...(recent.length > 0 ? [`[recent scenes: ${recent.join(' / ')}]`] : []), `[world: ${deal(random)}]`, `[style: ${STYLES[Math.floor(random() * STYLES.length)]}]`]
+      : [...(recent.length > 0 ? [`[recent scenes: ${recent.join(' / ')}]`] : []), `[world: ${deal(random)}]`, `[style: ${styles[Math.floor(random() * styles.length)]}]`]
     messages.push({ role: 'user', content: [activity, ...steer].join('\n') })
   }
 
@@ -395,5 +405,5 @@ export function createThread(model: Model, options: { isThinking?: boolean } = {
     }
   }
 
-  return { ask, request, isFallbackRefused, abandon, accept, isThinking: Boolean(options.isThinking) }
+  return { ask, request, isFallbackRefused, abandon, accept, isThinking: Boolean(options.isThinking), styles: options.styles ?? 'mix' }
 }

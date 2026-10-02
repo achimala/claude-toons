@@ -59,8 +59,10 @@ appear while Claude is working, and only in the terminal.
   `/toons on` and `/toons off` set it outright. The choice is remembered
   across sessions. While hidden, no scenes are requested, so they cost nothing.
 - `/toons settings` opens a pane to pick the director model, whether it
-  thinks before each scene, and how often a new scene is requested, with an
-  estimate of what that costs. The same settings are also in `/config`.
+  thinks before each scene, which styles the scenes are drawn in (a mix, 3D,
+  pixel art or text art only, or everything but 3D), and how often a new scene
+  is requested, with an estimate of what that costs. The same settings are
+  also in `/config`.
 
 ## What it costs
 
