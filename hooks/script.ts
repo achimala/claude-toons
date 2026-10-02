@@ -217,6 +217,8 @@ export type Code = {
   isReported?: boolean
   // When each line the code has Clawd say first showed, for the typing.
   said: Map<string, number>
+  // Where each line's bubble sat last, so it does not hop about.
+  bubblesAt: Map<string, { x: number; y: number }>
   // The 3D settings, kept between frames once the code sets them.
   cam?: Camera
   light?: Light
@@ -237,7 +239,7 @@ const FRAME_FUEL = 150_000
 
 function cleanCode(raw: unknown): Code | undefined {
   if (typeof raw !== 'string' || !raw.trim()) return undefined
-  const code: Code = { isStarted: false, lastT: 0, said: new Map() }
+  const code: Code = { isStarted: false, lastT: 0, said: new Map(), bubblesAt: new Map() }
   try {
     code.program = parseProgram(raw.slice(0, 20_000))
   } catch (e) {
@@ -317,6 +319,8 @@ type Canvas = {
   code: Code
   put: (col: number, row: number, char: string, color: Rgb, back?: Rgb) => void
   clear: (col: number, row: number) => void
+  // Marks a fill as under way: its cells do not count as drawn on.
+  fill: (on: boolean) => void
   // One pixel: a column and a pixel row (two to a cell).
   pixel: (col: number, py: number, color: Rgb) => void
   // Clawd with its top-left at a column and a pixel row; where things attach.
@@ -370,9 +374,11 @@ const API = {
   fill: (x: unknown, y: unknown, w: unknown, h: unknown, ch?: unknown, color?: unknown, bg?: unknown) => {
     const x0 = Math.round(num(x))
     const y0 = Math.round(num(y))
+    canvas?.fill(true)
     for (let row = y0; row < y0 + Math.min(60, Math.round(num(h))); row++) {
       for (let col = x0; col < x0 + Math.min(400, Math.round(num(w))); col++) API.put(col, row, ch ?? ' ', color, bg)
     }
+    canvas?.fill(false)
   },
   line: (x0: unknown, y0: unknown, x1: unknown, y1: unknown, ch?: unknown, color?: unknown) => {
     const ax = num(x0)
@@ -620,13 +626,9 @@ function meshIn(raw: unknown): Mesh | undefined {
 
 type Bubble = { lines: string[]; x: number; y: number; wide: number; tall: number; base: Rgb; tail?: { col: number; row: number; char: string } }
 
-// A bubble for code speech: above the point if it fits, else below, else
-// beside it, typed out over `age` seconds.
-function bubbleAt(text: string, px: number, py: number, base: Rgb, age: number, cols: number, rows: number): Bubble | undefined {
+// A bubble's text as typed out so far, and its size.
+function typedBubble(text: string, age: number, cols: number) {
   const all = wrap(text, Math.max(10, Math.min(30, cols - 6)))
-  const wide = Math.max(...all.map(line => line.length)) + 4
-  const tall = all.length + 2
-  if (wide > cols || tall > rows) return undefined
   let left = Math.floor((age * 1000) / BUBBLE_MS)
   const lines = all.map(line => {
     const part = line.slice(0, Math.max(0, left))
@@ -634,22 +636,58 @@ function bubbleAt(text: string, px: number, py: number, base: Rgb, age: number, 
 
     return part
   })
-  const x = clamp(Math.round(px - wide / 2), 0, cols - wide)
-  const tailCol = clamp(px, x + 2, x + wide - 3)
-  if (py - tall >= 0) return { lines, x, y: py - tall, wide, tall, base, tail: { col: tailCol, row: py - 1, char: '┬' } }
-  if (py + 1 + tall <= rows) return { lines, x, y: py + 1, wide, tall, base, tail: { col: tailCol, row: py + 1, char: '┴' } }
-  const y = clamp(py - Math.floor(tall / 2), 0, rows - tall)
-  const besideX = px + 2 + wide <= cols ? px + 2 : Math.max(0, px - 2 - wide)
 
-  return {
-    lines,
-    x: besideX,
-    y,
-    wide,
-    tall,
-    base,
-    tail: { col: besideX > px ? besideX : besideX + wide - 1, row: clamp(py, y + 1, y + tall - 2), char: besideX > px ? '┤' : '├' },
+  return { lines, wide: Math.max(...all.map(line => line.length)) + 4, tall: all.length + 2 }
+}
+
+// Where a bubble goes: the clearest spot near its speaker, scored by how
+// many drawn cells it would cover and how far it strays from the speaker's
+// box; the last spot keeps its place unless a clearly better one opens, so
+// the bubble does not hop about. The tail notches the border on the side
+// that faces the speaker.
+function placeBubble(args: { speaker: Box; wide: number; tall: number; cols: number; rows: number; covered: Uint8Array; last?: { x: number; y: number } }) {
+  const { speaker, wide, tall, cols, rows, covered, last } = args
+  const bottom = rows - 1
+  const cx = (speaker.x0 + speaker.x1 + 1) / 2
+  const cost = (x: number, y: number) => {
+    let blocked = 0
+    for (let row = y; row < y + tall; row++) {
+      for (let col = x; col < x + wide; col++) if (covered[row * cols + col]) blocked += 1
+    }
+    const gap = y + tall <= speaker.y0 ? speaker.y0 - (y + tall) : y > speaker.y1 ? y - speaker.y1 - 1 : 0
+    const side = x + wide <= speaker.x0 ? speaker.x0 - (x + wide) : x > speaker.x1 ? x - speaker.x1 - 1 : 0
+
+    return blocked * 10 + Math.abs(x + wide / 2 - cx) * 0.08 + gap * 0.6 + side * 0.15
   }
+  let best = { x: Math.max(0, Math.min(cols - wide, Math.round(cx - wide / 2))), y: Math.max(0, speaker.y0 - tall) }
+  let bestCost = Infinity
+  const lo = Math.max(0, Math.round(cx) - 50)
+  const hi = Math.min(cols - wide, Math.round(cx) + 50)
+  for (let y = 0; y + tall - 1 <= bottom; y++) {
+    // Every other column, and both bounds.
+    for (let x = lo; x <= hi + 1; x += 2) {
+      const xx = Math.min(x, hi)
+      const c = cost(xx, y)
+      if (c < bestCost) {
+        bestCost = c
+        best = { x: xx, y }
+      }
+    }
+  }
+  if (last && last.x >= 0 && last.x <= cols - wide && last.y >= 0 && last.y + tall - 1 <= bottom && cost(last.x, last.y) <= bestCost + 3) best = last
+  const { x, y } = best
+  const tailCol = Math.max(x + 2, Math.min(x + wide - 3, Math.round(cx)))
+  const tailRow = Math.max(y + 1, Math.min(y + tall - 2, Math.round((speaker.y0 + speaker.y1) / 2)))
+  const tail =
+    y + tall - 1 < speaker.y0 ? { col: tailCol, row: y + tall - 1, char: '┬' }
+    : y > speaker.y1 ? { col: tailCol, row: y, char: '┴' }
+    : x + wide - 1 < speaker.x0 ? { col: x + wide - 1, row: tailRow, char: '├' }
+    : x > speaker.x1 ? { col: x, row: tailRow, char: '┤' }
+    : undefined
+  // The bubble's cells count as drawn for the next bubble.
+  for (let row = y; row < y + tall; row++) for (let col = x; col < x + wide; col++) covered[row * cols + col] = 1
+
+  return { x, y, tail }
 }
 
 export type Stage = {
@@ -800,50 +838,16 @@ export function stage(frame: Stage): string {
     const tall = all.length + 2
     if (tall > rows || wide > cols) continue
     const bottom = rows - 1
-    // Every spot near the speaker, scored by how many sprite cells it would
-    // cover and how far it strays; the last spot keeps its place unless a
-    // clearly better one opens, so the bubble does not hop about.
-    const cx = one.x + one.width / 2
-    const cost = (x: number, y: number) => {
-      let blocked = 0
-      for (let row = y; row < y + tall; row++) {
-        for (let col = x; col < x + wide; col++) if (covered[row * cols + col]) blocked += 1
-      }
-      const gap = y + tall <= one.y ? one.y - (y + tall) : y >= one.y + one.lines.length ? y - (one.y + one.lines.length) : 0
-      const side = x + wide <= one.x ? one.x - (x + wide) : x >= one.x + one.width ? x - (one.x + one.width) : 0
-
-      return blocked * 10 + Math.abs(x + wide / 2 - cx) * 0.08 + gap * 0.6 + side * 0.15
-    }
-    let best = { x: Math.max(0, Math.min(cols - wide, Math.round(cx - wide / 2))), y: Math.max(0, one.y - tall) }
-    let bestCost = Infinity
-    for (let y = 0; y + tall - 1 <= bottom; y++) {
-      for (let x = Math.max(0, Math.round(cx) - 50); x <= Math.min(cols - wide, Math.round(cx) + 50); x += 2) {
-        const c = cost(x, y)
-        if (c < bestCost) {
-          bestCost = c
-          best = { x, y }
-        }
-      }
-    }
-    const last = lastBubble.get(actor)
-    if (last && last.x <= cols - wide && last.y + tall - 1 <= bottom && cost(last.x, last.y) <= bestCost + 3) best = last
-    lastBubble.set(actor, best)
-    // The tail: a notch in the border on the side that faces the speaker.
-    const { x, y } = best
     const outline = spans(one)
     const drawn = outline.flatMap((span, dy) => (span ? [{ ...span, row: one.y + dy }] : []))
-    const sx0 = Math.min(...drawn.map(d => d.x0))
-    const sx1 = Math.max(...drawn.map(d => d.x1))
-    const sy0 = Math.min(...drawn.map(d => d.row))
-    const sy1 = Math.max(...drawn.map(d => d.row))
-    const tailCol = Math.max(x + 2, Math.min(x + wide - 3, Math.round(cx)))
-    const tailRow = Math.max(y + 1, Math.min(y + tall - 2, Math.round((sy0 + sy1) / 2)))
-    const tail =
-      y + tall - 1 < sy0 ? { col: tailCol, row: y + tall - 1, char: '┬' }
-      : y > sy1 ? { col: tailCol, row: y, char: '┴' }
-      : x + wide - 1 < sx0 ? { col: x + wide - 1, row: tailRow, char: '├' }
-      : x > sx1 ? { col: x, row: tailRow, char: '┤' }
-      : undefined
+    const speaker: Box = {
+      x0: Math.min(...drawn.map(d => d.x0)),
+      x1: Math.max(...drawn.map(d => d.x1)),
+      y0: Math.min(...drawn.map(d => d.row)),
+      y1: Math.max(...drawn.map(d => d.row)),
+    }
+    const { x, y, tail } = placeBubble({ speaker, wide, tall, cols, rows, covered, last: lastBubble.get(actor) })
+    lastBubble.set(actor, { x, y })
     bubbles.push({ lines, x, y, wide, tall, base: parseHex(actor.color), tail })
   }
 
@@ -907,6 +911,15 @@ export function stage(frame: Stage): string {
     }
   }
 
+  // The cells the code has drawn characters and sprites on this frame (not
+  // fills), and the last Clawd it drew: what its speech bubbles stay off.
+  const inked = new Uint8Array(cols * rows)
+  let isFilling = false
+  const ink = (col: number, row: number) => {
+    if (!isFilling && col >= 0 && col < cols && row >= 0 && row < rows) inked[row * cols + col] = 1
+  }
+  let lastClawd: Box | undefined
+
   // The frame's 3D samples, made when the code first draws in 3D, and drawn
   // as glyphs before any 2D drawing that follows, so that sits on top.
   let frame3d: Frame | undefined
@@ -968,6 +981,10 @@ export function stage(frame: Stage): string {
       put: (col, row, char, color, back) => {
         flush3d()
         put(col, row, char, color, back)
+        ink(col, row)
+      },
+      fill: (on: boolean) => {
+        isFilling = on
       },
       clear: (col, row) => {
         flush3d()
@@ -976,11 +993,15 @@ export function stage(frame: Stage): string {
       pixel: (col, py, color) => {
         flush3d()
         plotPixel(col, py, color)
+        ink(col, Math.floor(py / 2))
       },
       clawd: (x, py, look, scaleTo, atDepth) => {
         flush3d()
+        const a = paintClawd(x, py, look, scaleTo, atDepth)
+        lastClawd = { x0: x - 1, y0: Math.floor(py / 2), x1: x + a.w, y1: Math.floor((py + a.h - 1) / 2) }
+        for (let row = lastClawd.y0; row <= lastClawd.y1; row++) for (let col = lastClawd.x0; col <= lastClawd.x1; col++) ink(col, row)
 
-        return paintClawd(x, py, look, scaleTo, atDepth)
+        return a
       },
       scene3d: () => {
         if (!scene3d) {
@@ -1005,8 +1026,15 @@ export function stage(frame: Stage): string {
           if (code.said.size >= 32) code.said.clear()
           code.said.set(text, first)
         }
-        const bubble = bubbleAt(text, x, y, color, sceneT - first, cols, rows)
-        if (bubble) bubbles.push(bubble)
+        const { lines, wide, tall } = typedBubble(text, sceneT - first, cols)
+        if (wide > cols || tall > rows) return
+        // The speaker is the Clawd last drawn when the point is on or beside
+        // it; otherwise the point itself.
+        const near = lastClawd && x >= lastClawd.x0 - 2 && x <= lastClawd.x1 + 2 && y >= lastClawd.y0 - 1 && y <= lastClawd.y1 + 1
+        const speaker: Box = near && lastClawd ? lastClawd : { x0: x, y0: y, x1: x, y1: y }
+        const placed3 = placeBubble({ speaker, wide, tall, cols, rows, covered: inked, last: code.bubblesAt.get(text) })
+        code.bubblesAt.set(text, { x: placed3.x, y: placed3.y })
+        bubbles.push({ lines, x: placed3.x, y: placed3.y, wide, tall, base: color, tail: placed3.tail })
       },
     }
     try {
