@@ -318,10 +318,17 @@ async function readPlan($: EngineInterface, b: Buddy) {
 // reloads the plugin with it. The row's key is the plugin's name (or its
 // name@inline when loaded from a folder), a dot, and the field.
 async function setOption($: EngineInterface, field: string, value: string) {
-  const rows = await $.config.list()
-  const row = rows.find(r => r.key.startsWith(PLUGIN) && r.key.endsWith(`.${field}`))
-  const { deny } = await $.config.set({ key: row?.key ?? `${PLUGIN}.${field}`, value })
-  if (deny) $.ui.toast(`toons: could not change ${field}: ${deny}`)
+  try {
+    // The row is found by its label rather than the plugin's name, which the
+    // engine may still hold from an older manifest until it restarts.
+    const rows = await $.config.list()
+    const row = rows.find(r => r.key.endsWith(`.${field}`) && (r.key.startsWith(`${PLUGIN}.`) || r.label.startsWith('Toons:')))
+    if (!row) throw new Error('no such setting; restart Claude Code if the plugin was renamed')
+    const { deny } = await $.config.set({ key: row.key, value })
+    if (deny) throw new Error(deny)
+  } catch (e) {
+    $.ui.toast(`toons: could not change ${field}: ${e instanceof Error ? e.message : String(e)}`)
+  }
 }
 
 // Paints the scene at about 20 frames a second while the spinner shows, each
