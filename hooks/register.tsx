@@ -638,6 +638,7 @@ export const register: Register = (on, options) => {
           value={b.thread.styles}
           onSelect={(value: string) => void setOption($, 'styles', value)}
         />
+        <Text dimColor>Tab moves to the next setting, arrows change its value, Enter confirms</Text>
         <Text dimColor>Toggle any time with /toons, even while Claude works</Text>
 
         {b.isFree ? (

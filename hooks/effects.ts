@@ -259,7 +259,7 @@ export function cleanText(text: string, most: number) {
     .replace(/[“”]/g, '"')
     .replace(/[–—]/g, '-')
     .replace(/…/g, '...')
-    .replace(/[^\x20-\x7e]/g, '')
+    .replace(/[^\x20-\x7e¡-¬®-ſ]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, most)

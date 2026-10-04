@@ -259,7 +259,7 @@ function cleanCode(raw: unknown): Code | undefined {
 const QUARTER_HALVES = [2, 2, 1, 3, 3, 3, 3, 1, 3, 3]
 
 // Characters a sprite may hold: what one terminal cell draws at one width.
-const DRAWABLE = /[\x21-\x7e¡-ÿ←-⇿─-◿⠀-⣿★☆♥♦♣♠♪♫☺☻✓✗✦✧]/
+const DRAWABLE = /[\x21-\x7e¡-ſ←-⇿─-◿⠀-⣿★☆♥♦♣♠♪♫☺☻✓✗✦✧]/
 
 const glyphsOf = (line: string) => [...line].map(c => (c === ' ' || DRAWABLE.test(c) ? c : ' '))
 
